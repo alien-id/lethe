@@ -5,7 +5,7 @@ import logging
 import os
 import signal
 import sys
-from typing import Optional
+from typing import Callable, Optional
 
 # Load .env file before anything else
 from dotenv import load_dotenv
@@ -20,6 +20,13 @@ from lethe.conversation import ConversationManager
 from lethe.telegram import TelegramBot
 from lethe.heartbeat import Heartbeat
 from lethe import console as lethe_console
+from lethe.reaction_transport import send_message_reaction
+from lethe.telegram_turn_guard import (
+    clear_telegram_turn_guard,
+    get_telegram_turn_guard,
+    is_emoji_only_reply,
+    start_telegram_turn_guard,
+)
 
 console = Console()
 
@@ -40,6 +47,44 @@ def setup_logging(verbose: bool = False):
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("httpcore").setLevel(logging.WARNING)
     logging.getLogger("onnxruntime").setLevel(logging.WARNING)
+
+
+async def _send_guarded_telegram_final_response(
+    telegram_bot: TelegramBot,
+    chat_id: int,
+    response: str,
+    mark_user_visible_activity: Callable[[str], None],
+) -> None:
+    guard = get_telegram_turn_guard()
+    pending_reactions = guard.drain_pending_reactions() if guard else []
+
+    if guard and is_emoji_only_reply(response) and pending_reactions:
+        if guard.choose_visible_channel() == "reaction":
+            pending = pending_reactions[0]
+            await send_message_reaction(
+                pending.bot,
+                pending.chat_id,
+                pending.message_id,
+                pending.emoji,
+            )
+            mark_user_visible_activity("assistant reaction response")
+        else:
+            await telegram_bot.send_message(chat_id, response)
+            mark_user_visible_activity("assistant final response")
+        return
+
+    for pending in pending_reactions:
+        await send_message_reaction(
+            pending.bot,
+            pending.chat_id,
+            pending.message_id,
+            pending.emoji,
+        )
+        mark_user_visible_activity("assistant reaction response")
+
+    if response and response.strip():
+        await telegram_bot.send_message(chat_id, response)
+        mark_user_visible_activity("assistant final response")
 
 
 async def run():
@@ -152,6 +197,7 @@ async def run():
         set_telegram_context(telegram_bot.bot, chat_id)
         if metadata.get("message_id"):
             set_last_message_id(metadata["message_id"])
+        start_telegram_turn_guard()
         
         # Start typing indicator
         await telegram_bot.start_typing(chat_id)
@@ -187,14 +233,19 @@ async def run():
             
             # Send response
             logger.info(f"Sending response ({len(response)} chars): {response[:80]}...")
-            await telegram_bot.send_message(chat_id, response)
-            mark_user_visible_activity("assistant final response")
+            await _send_guarded_telegram_final_response(
+                telegram_bot,
+                chat_id,
+                response,
+                mark_user_visible_activity,
+            )
             
         except Exception as e:
             logger.exception(f"Error processing message: {e}")
             await telegram_bot.send_message(chat_id, f"Error: {e}")
             mark_user_visible_activity("assistant error response")
         finally:
+            clear_telegram_turn_guard()
             await telegram_bot.stop_typing(chat_id)
             clear_telegram_context()
 

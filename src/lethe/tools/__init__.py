@@ -177,6 +177,7 @@ _CORE_TOOLS = [
     # Telegram
     (telegram_send_message, "telegram_send_message"),
     (telegram_send_file, "telegram_send_file"),
+    (telegram_react, "telegram_react"),
 ]
 
 # Extended tools — available on demand via request_tool()
@@ -185,7 +186,6 @@ _EXTENDED_TOOLS = {
     "browser_snapshot": (browser_snapshot, "browser_snapshot"),
     "browser_click": (browser_click, "browser_click"),
     "browser_fill": (browser_fill, "browser_fill"),
-    "telegram_react": (telegram_react, "telegram_react"),
     "note_list": (note_list, None),
 }
 
@@ -210,13 +210,12 @@ def request_tool(name: str) -> str:
 
     Core tools (bash, read/write/edit_file, list_directory, grep_search,
     web_search, note_search, note_create, telegram_send_message,
-    spawn_actor, send_message, discover_actors, memory_read, memory_update,
-    request_tool) are always available.
+    telegram_send_file, telegram_react, spawn_actor, send_message,
+    discover_actors, memory_read, memory_update, request_tool) are always available.
 
     Extended tools that can be requested:
     - browser_open, browser_snapshot, browser_click, browser_fill — Browser automation
     - fetch_webpage — Fetch full page content
-    - telegram_send_file, telegram_react — Telegram extras
     - archival_search, archival_insert, conversation_search — Legacy memory search
     - memory_append — Append to memory blocks
     - kill_actor, ping_actor, terminate — Actor management

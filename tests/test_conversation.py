@@ -74,6 +74,18 @@ class TestConversationState:
         assert metadata == {"a": 3, "b": 2}  # Merged, later overrides
         assert len(state.pending_messages) == 0
 
+    def test_get_combined_message_multiple_message_id_last_wins(self):
+        state = ConversationState(chat_id=123, user_id=456)
+        state.add_message("first", {"message_id": 1, "a": 1})
+        state.add_message("second", {"message_id": 2, "b": 2})
+
+        content, metadata = state.get_combined_message()
+
+        assert content == "first\n\nsecond"
+        assert metadata["message_id"] == 2
+        assert metadata["a"] == 1
+        assert metadata["b"] == 2
+
     def test_get_combined_message_empty(self):
         state = ConversationState(chat_id=123, user_id=456)
         

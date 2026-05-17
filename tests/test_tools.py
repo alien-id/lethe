@@ -1,6 +1,7 @@
 """Tests for Lethe tools."""
 
 import asyncio
+import json
 import os
 import tempfile
 from pathlib import Path
@@ -782,6 +783,106 @@ class TestWebSearch:
         # Might succeed or fail depending on Exa's handling
         assert isinstance(data, dict)
         assert "status" in data
+
+
+class DummyTelegramBot:
+    def __init__(self):
+        self.calls = []
+
+    async def set_message_reaction(self, chat_id, message_id, reaction, **kwargs):
+        self.calls.append((chat_id, message_id, reaction))
+
+
+class TestTelegramReactTool:
+    def test_telegram_react_is_core_tool(self):
+        from lethe.tools import get_core_tools
+
+        names = [schema["name"] for _, schema in get_core_tools()]
+        assert "telegram_react" in names
+
+    def test_telegram_react_schema_includes_optional_message_id(self):
+        from lethe.tools import function_to_schema
+        from lethe.tools.telegram_tools import telegram_react_async
+
+        schema = function_to_schema(telegram_react_async)
+        assert schema["parameters"]["properties"]["message_id"]["type"] == "integer"
+        assert "message_id" not in schema["parameters"]["required"]
+
+    def test_request_tool_does_not_advertise_telegram_react(self):
+        from lethe.tools import request_tool
+
+        assert "Unknown tool: telegram_react" in request_tool("telegram_react")
+
+    @pytest.mark.asyncio
+    async def test_telegram_react_uses_explicit_message_id(self):
+        from lethe.tools.telegram_tools import (
+            clear_telegram_context,
+            set_last_message_id,
+            set_telegram_context,
+            telegram_react_async,
+        )
+
+        bot = DummyTelegramBot()
+        set_telegram_context(bot, 99)
+        set_last_message_id(42)
+
+        try:
+            payload = json.loads(await telegram_react_async("🔥", message_id=77))
+        finally:
+            clear_telegram_context()
+
+        assert payload["emoji"] == "🔥"
+        assert payload["message_id"] == 77
+        assert bot.calls[0][0] == 99
+        assert bot.calls[0][1] == 77
+        assert getattr(bot.calls[0][2][0], "emoji", None) == "🔥"
+
+    @pytest.mark.asyncio
+    async def test_telegram_react_falls_back_to_last_message_id(self):
+        from lethe.tools.telegram_tools import (
+            clear_telegram_context,
+            set_last_message_id,
+            set_telegram_context,
+            telegram_react_async,
+        )
+
+        bot = DummyTelegramBot()
+        set_telegram_context(bot, 99)
+        set_last_message_id(42)
+
+        try:
+            payload = json.loads(await telegram_react_async("👍"))
+        finally:
+            clear_telegram_context()
+
+        assert payload["message_id"] == 42
+        assert bot.calls[0][1] == 42
+
+    @pytest.mark.asyncio
+    async def test_telegram_react_queues_when_guard_active(self):
+        from lethe.telegram_turn_guard import clear_telegram_turn_guard, start_telegram_turn_guard
+        from lethe.tools.telegram_tools import (
+            clear_telegram_context,
+            set_last_message_id,
+            set_telegram_context,
+            telegram_react_async,
+        )
+
+        bot = DummyTelegramBot()
+        start_telegram_turn_guard(rng=lambda: 0.25)
+        set_telegram_context(bot, 99)
+        set_last_message_id(42)
+
+        try:
+            payload = json.loads(await telegram_react_async("🔥", message_id=77))
+        finally:
+            clear_telegram_context()
+            clear_telegram_turn_guard()
+
+        assert payload["success"] is True
+        assert payload["queued"] is True
+        assert payload["message_id"] == 77
+        assert bot.calls == []
 
 
 # ============================================================================

@@ -3,17 +3,18 @@
 import asyncio
 import logging
 from io import BytesIO
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode, ChatAction
 from aiogram.filters import Command, CommandStart
-from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, MessageReactionUpdated
 
 from lethe.config import Settings, get_settings
 from lethe.conversation import ConversationManager
 from lethe.models import MODEL_CATALOG, get_available_providers, provider_for_model, _PROVIDER_LABELS
+from lethe.reaction_transport import send_message_reaction
 from lethe.telegram.stickers import StickerProcessor
 from lethe.transcription import TranscriptionError, transcribe_audio
 
@@ -47,6 +48,7 @@ class TelegramBot:
         self._sticker_tasks: dict[int, asyncio.Task] = {}
         self._last_message_id: Optional[int] = None
         self._last_chat_id: Optional[int] = None
+        self._bot_user_id: Optional[int] = None
         self._sticker_processor: Optional[StickerProcessor] = None
 
         self._setup_handlers()
@@ -185,20 +187,13 @@ class TelegramBot:
                 await message.answer("Bot not fully initialized.")
                 return
 
-            # Store last message ID for reactions
-            self._last_message_id = message.message_id
-            self._last_chat_id = message.chat.id
-            
-            # Add message to conversation manager
+            self._remember_last_message(message)
+
             await self.conversation_manager.add_message(
                 chat_id=message.chat.id,
                 user_id=message.from_user.id,
                 content=message.text,
-                metadata={
-                    "username": message.from_user.username,
-                    "first_name": message.from_user.first_name,
-                    "message_id": message.message_id,
-                },
+                metadata=self._build_message_metadata(message),
                 process_callback=self.process_callback,
             )
 
@@ -247,17 +242,17 @@ class TelegramBot:
                     f"Received photo ({photo.width}x{photo.height}) with caption: {caption_preview}..."
                 )
                 
-                # Add message to conversation manager with multimodal content
+                self._remember_last_message(message)
+
                 await self.conversation_manager.add_message(
                     chat_id=message.chat.id,
                     user_id=message.from_user.id,
                     content=multimodal_content,  # Pass as list for multimodal
-                    metadata={
-                        "username": message.from_user.username,
-                        "first_name": message.from_user.first_name,
-                        "is_photo": True,
-                        "photo_size": f"{photo.width}x{photo.height}",
-                    },
+                    metadata=self._build_message_metadata(
+                        message,
+                        is_photo=True,
+                        photo_size=f"{photo.width}x{photo.height}",
+                    ),
                     process_callback=self.process_callback,
                 )
             except Exception as e:
@@ -275,8 +270,7 @@ class TelegramBot:
                 await message.answer("Bot not fully initialized.")
                 return
 
-            self._last_message_id = message.message_id
-            self._last_chat_id = message.chat.id
+            self._remember_last_message(message)
 
             task = asyncio.create_task(self._process_sticker_message(message))
             self._sticker_tasks[message.message_id] = task
@@ -297,9 +291,7 @@ class TelegramBot:
                 await message.answer("Bot not fully initialized.")
                 return
 
-            # Store last message ID for reactions
-            self._last_message_id = message.message_id
-            self._last_chat_id = message.chat.id
+            self._remember_last_message(message)
 
             if not self.settings.telegram_transcription_enabled:
                 await message.answer("Voice transcription is disabled.")
@@ -335,19 +327,17 @@ class TelegramBot:
                     chat_id=message.chat.id,
                     user_id=message.from_user.id,
                     content=content,
-                    metadata={
-                        "username": message.from_user.username,
-                        "first_name": message.from_user.first_name,
-                        "message_id": message.message_id,
-                        "is_voice": is_voice,
-                        "is_audio": not is_voice,
-                        "file_name": file_name,
-                        "mime_type": mime_type,
-                        "duration": getattr(media, "duration", None),
-                        "file_size": getattr(media, "file_size", None),
-                        "transcription_provider": self.settings.transcription_provider or "auto",
-                        "transcription_model": self.settings.transcription_model or "default",
-                    },
+                    metadata=self._build_message_metadata(
+                        message,
+                        is_voice=is_voice,
+                        is_audio=not is_voice,
+                        file_name=file_name,
+                        mime_type=mime_type,
+                        duration=getattr(media, "duration", None),
+                        file_size=getattr(media, "file_size", None),
+                        transcription_provider=self.settings.transcription_provider or "auto",
+                        transcription_model=self.settings.transcription_model or "default",
+                    ),
                     process_callback=self.process_callback,
                 )
             except TranscriptionError as e:
@@ -370,7 +360,9 @@ class TelegramBot:
 
             document = message.document
             file_name = document.file_name or f"file_{document.file_id}"
-            
+
+            self._remember_last_message(message)
+
             # Create Downloads directory in workspace
             downloads_dir = self.settings.workspace_dir / "Downloads"
             downloads_dir.mkdir(parents=True, exist_ok=True)
@@ -392,25 +384,27 @@ class TelegramBot:
                 else:
                     content = file_info
                 
-                # Add message to conversation manager
                 await self.conversation_manager.add_message(
                     chat_id=message.chat.id,
                     user_id=message.from_user.id,
                     content=content,
-                    metadata={
-                        "username": message.from_user.username,
-                        "first_name": message.from_user.first_name,
-                        "is_document": True,
-                        "file_name": file_name,
-                        "file_path": str(file_path),
-                        "file_size": document.file_size,
-                        "mime_type": document.mime_type,
-                    },
+                    metadata=self._build_message_metadata(
+                        message,
+                        is_document=True,
+                        file_name=file_name,
+                        file_path=str(file_path),
+                        file_size=document.file_size,
+                        mime_type=document.mime_type,
+                    ),
                     process_callback=self.process_callback,
                 )
             except Exception as e:
                 logger.error(f"Failed to process document: {e}")
                 await message.answer(f"Failed to download file: {e}")
+
+        @self.dp.message_reaction()
+        async def handle_message_reaction(update: MessageReactionUpdated):
+            await self._process_reaction_update(update)
 
     def _get_sticker_processor(self) -> Optional[StickerProcessor]:
         if self._sticker_processor is not None:
@@ -453,27 +447,38 @@ class TelegramBot:
             logger.exception("Failed to process Telegram sticker")
             await message.answer(f"Failed to process sticker: {e}")
 
-    def _build_sticker_metadata(self, message: Message, local_path: Optional[object], preview_path: Optional[object], error: Optional[str]) -> dict:
-        sticker = message.sticker
-        assert sticker is not None
-        return {
+    def _remember_last_message(self, message: Message) -> None:
+        self._last_message_id = message.message_id
+        self._last_chat_id = message.chat.id
+
+    def _build_message_metadata(self, message: Message, **extra: Any) -> dict:
+        metadata = {
             "username": message.from_user.username if message.from_user else None,
             "first_name": message.from_user.first_name if message.from_user else None,
             "message_id": message.message_id,
-            "is_sticker": True,
-            "file_id": sticker.file_id,
-            "file_unique_id": getattr(sticker, "file_unique_id", None),
-            "emoji": getattr(sticker, "emoji", None),
-            "set_name": getattr(sticker, "set_name", None),
-            "is_animated": bool(getattr(sticker, "is_animated", False)),
-            "is_video": bool(getattr(sticker, "is_video", False)),
-            "width": getattr(sticker, "width", None),
-            "height": getattr(sticker, "height", None),
-            "file_size": getattr(sticker, "file_size", None),
-            "file_path": str(local_path) if local_path else None,
-            "preview_path": str(preview_path) if preview_path else None,
-            "error": error,
         }
+        metadata.update(extra)
+        return metadata
+
+    def _build_sticker_metadata(self, message: Message, local_path: Optional[object], preview_path: Optional[object], error: Optional[str]) -> dict:
+        sticker = message.sticker
+        assert sticker is not None
+        return self._build_message_metadata(
+            message,
+            is_sticker=True,
+            file_id=sticker.file_id,
+            file_unique_id=getattr(sticker, "file_unique_id", None),
+            emoji=getattr(sticker, "emoji", None),
+            set_name=getattr(sticker, "set_name", None),
+            is_animated=bool(getattr(sticker, "is_animated", False)),
+            is_video=bool(getattr(sticker, "is_video", False)),
+            width=getattr(sticker, "width", None),
+            height=getattr(sticker, "height", None),
+            file_size=getattr(sticker, "file_size", None),
+            file_path=str(local_path) if local_path else None,
+            preview_path=str(preview_path) if preview_path else None,
+            error=error,
+        )
 
     def _format_sticker_fallback(self, sticker) -> str:
         parts = ["[Sticker received:"]
@@ -483,6 +488,72 @@ class TelegramBot:
             parts.append(f' set="{sticker.set_name}"')
         parts.append(" visual description unavailable]")
         return "".join(parts)
+
+    def _reaction_user(self, update: MessageReactionUpdated) -> Optional[Any]:
+        return getattr(update, "user", None)
+
+    def _reaction_values(self, reactions: Optional[list[Any]]) -> list[str]:
+        values = []
+        for reaction in reactions or []:
+            emoji = getattr(reaction, "emoji", None)
+            if emoji:
+                values.append(emoji)
+                continue
+            custom_emoji_id = getattr(reaction, "custom_emoji_id", None)
+            if custom_emoji_id:
+                values.append(f"custom:{custom_emoji_id}")
+                continue
+            values.append(reaction.__class__.__name__)
+        return values
+
+    def _build_reaction_event(self, update: MessageReactionUpdated) -> tuple[str, dict]:
+        user = self._reaction_user(update)
+        old_values = self._reaction_values(getattr(update, "old_reaction", None))
+        new_values = self._reaction_values(getattr(update, "new_reaction", None))
+        action = "updated"
+        if new_values and not old_values:
+            action = "added"
+        elif old_values and not new_values:
+            action = "removed"
+        actor_label = getattr(user, "username", None) or getattr(user, "first_name", None) or "unknown actor"
+        message_id = getattr(update, "message_id", None)
+        reactions_text = ", ".join(new_values or old_values or ["none"])
+        content = f"[Telegram reaction {action}: {actor_label} -> message {message_id} ({reactions_text})]"
+        metadata = {
+            "message_id": message_id,
+            "chat_id": update.chat.id,
+            "reaction_update_type": "message_reaction",
+            "reaction_action": action,
+            "reaction_user_id": user.id if user else None,
+            "reaction_user_username": getattr(user, "username", None),
+            "reaction_user_name": getattr(user, "first_name", None),
+            "reaction_old": old_values,
+            "reaction_new": new_values,
+        }
+        return content, metadata
+
+    async def _process_reaction_update(self, update: MessageReactionUpdated):
+        user = self._reaction_user(update)
+        if not user:
+            logger.debug("Ignoring reaction update without user for message %s", getattr(update, "message_id", None))
+            return
+        if not self._is_authorized(user.id):
+            logger.debug("Ignoring unauthorized reaction update from %s", user.id)
+            return
+        if self._bot_user_id and user.id == self._bot_user_id:
+            logger.debug("Ignoring self-authored reaction update for message %s", getattr(update, "message_id", None))
+            return
+        if not self.conversation_manager or not self.process_callback:
+            return
+
+        content, metadata = self._build_reaction_event(update)
+        await self.conversation_manager.add_message(
+            chat_id=update.chat.id,
+            user_id=user.id,
+            content=content,
+            metadata=metadata,
+            process_callback=self.process_callback,
+        )
 
     def _get_current_auth(self) -> str:
         """Return current auth type: 'sub' if OAuth is active, 'API' otherwise."""
@@ -677,13 +748,8 @@ class TelegramBot:
     
     async def react_to_message(self, chat_id: int, message_id: int, emoji: str = "👍"):
         """React to a message with an emoji."""
-        from aiogram.types import ReactionTypeEmoji
         try:
-            await self.bot.set_message_reaction(
-                chat_id=chat_id,
-                message_id=message_id,
-                reaction=[ReactionTypeEmoji(emoji=emoji)]
-            )
+            await send_message_reaction(self.bot, chat_id, message_id, emoji)
             logger.info(f"Reacted to message {message_id} with {emoji}")
         except Exception as e:
             logger.warning(f"Failed to react to message: {e}")
@@ -726,6 +792,12 @@ class TelegramBot:
         """Start the bot."""
         self._running = True
         logger.info("Starting Telegram bot...")
+        try:
+            me = await self.bot.get_me()
+        except Exception as e:
+            logger.warning("Failed to resolve Telegram bot identity for reaction filtering: %s", e)
+        else:
+            self._bot_user_id = me.id
         # handle_signals=False lets us handle SIGTERM ourselves
         await self.dp.start_polling(self.bot, handle_signals=False)
 
