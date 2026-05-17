@@ -2,6 +2,19 @@
 
 All notable changes to this project are documented in this file.
 
+## v0.16.1 - 2026-05-17
+
+### Fixed
+- **Telegram emoji-only replies double-fired** (#20): when the assistant queued a `telegram_react` and its final reply was emoji-only, both a reaction and a text reply were emitted, producing duplicate visible output. A per-turn `ContextVar` guard now buffers `telegram_react` calls during the active turn and, at finalization, picks one channel (reaction or text) when both would otherwise carry the same emoji-only signal. Mixed turns still flush queued reactions then send the text reply.
+
+### Added
+- **User reactions are now ingested as conversation events** (#20): the bot subscribes to `message_reaction` updates and injects synthetic `[Telegram reaction added/removed/updated: …]` messages into the conversation manager (auth-gated; self-reactions filtered via bot identity resolved at startup).
+- **`telegram_react` promoted to core tool** (#20): no longer requires `request_tool()`. Accepts an optional `message_id` argument to react to a specific message instead of the last tracked inbound one.
+
+### Internal
+- Extracted shared `send_message_reaction` transport into `src/lethe/reaction_transport.py`; `TelegramBot.react_to_message` and the agent-facing `telegram_react` tool both route through it.
+- Consolidated Telegram inbound-message metadata construction into `_build_message_metadata` / `_remember_last_message` helpers on `TelegramBot`.
+
 ## v0.16.0 - 2026-05-11
 
 ### Added
