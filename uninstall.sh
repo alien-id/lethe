@@ -14,6 +14,7 @@ NC='\033[0m'
 
 LETHE_HOME="${LETHE_HOME:-$HOME/.lethe}"
 INSTALL_DIR="${LETHE_INSTALL_DIR:-$LETHE_HOME/install}"
+BIN_DIR="$LETHE_HOME/bin"
 
 info() { echo -e "${BLUE}[INFO]${NC} $1"; }
 success() { echo -e "${GREEN}[OK]${NC} $1"; }
@@ -52,9 +53,10 @@ echo ""
 echo "This will remove:"
 echo "  - All Lethe services (native and container)"
 echo "  - Container rootfs / images"
-echo "  - Installation directory: $INSTALL_DIR"
+echo "  - Installed binaries: $BIN_DIR/lethe, $BIN_DIR/lethe-migrate (if present)"
+echo "  - Source checkout: $INSTALL_DIR"
 echo ""
-echo "This will NOT remove:"
+echo "This will NOT remove (unless you opt in at the end):"
 echo "  - Your data: $LETHE_HOME (workspace, config, memory, credentials)"
 echo ""
 prompt_read "Are you sure you want to uninstall Lethe? [y/N] " REPLY
@@ -179,7 +181,21 @@ fi
 # Launch script
 rm -f "$LETHE_HOME/run-container.sh" 2>/dev/null || true
 
-# Installation directory
+# Installed binaries
+for bin_name in lethe lethe-migrate; do
+    if [[ -f "$BIN_DIR/$bin_name" ]]; then
+        info "Removing $BIN_DIR/$bin_name..."
+        rm -f "$BIN_DIR/$bin_name"
+        success "$bin_name binary removed"
+    fi
+done
+# Drop $BIN_DIR if we left it empty, but only if it sits under
+# $LETHE_HOME — never touch a user-chosen path with other things in it.
+if [[ -d "$BIN_DIR" && "$BIN_DIR" == "$LETHE_HOME/bin" ]]; then
+    rmdir "$BIN_DIR" 2>/dev/null || true
+fi
+
+# Installation directory (source checkout)
 if [[ -d "$INSTALL_DIR" ]]; then
     info "Removing installation directory ($INSTALL_DIR)..."
     rm -rf "$INSTALL_DIR"
