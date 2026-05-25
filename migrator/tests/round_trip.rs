@@ -3,6 +3,7 @@
 //! binary, then read the resulting `lethe-memory.db` and assert that
 //! every row landed with its embedding intact.
 
+use std::ffi::c_char;
 use std::process::Command;
 use std::sync::{Arc, Once};
 
@@ -17,9 +18,10 @@ use sqlite_vec::sqlite3_vec_init;
 const DIM: usize = 768;
 const INIT_ID: &str = "_init_";
 
+// See `migrator::dest::ExtInit` — same arch-dependent c_char wrinkle.
 type ExtInit = unsafe extern "C" fn(
     *mut sqlite3,
-    *mut *mut i8,
+    *mut *mut c_char,
     *const sqlite3_api_routines,
 ) -> i32;
 

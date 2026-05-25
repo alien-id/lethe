@@ -2,6 +2,7 @@
 //! a single transaction (per spec §4 / §5); a `Destination::commit()`
 //! either lands every row or rolls the transaction back on drop.
 
+use std::ffi::c_char;
 use std::path::Path;
 use std::sync::Once;
 
@@ -13,9 +14,12 @@ use sqlite_vec::sqlite3_vec_init;
 
 use crate::source::{ArchivalRow, MessageRow, NoteRow};
 
+// `c_char` is `i8` on x86_64-linux and `u8` on aarch64-linux. Hard-coding
+// either side breaks the other arch; `c_char` resolves to whatever the
+// platform's sqlite3 headers expose.
 type ExtInit = unsafe extern "C" fn(
     *mut sqlite3,
-    *mut *mut i8,
+    *mut *mut c_char,
     *const sqlite3_api_routines,
 ) -> i32;
 
