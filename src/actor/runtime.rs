@@ -817,16 +817,17 @@ impl Message<PrincipalTaskUpdateEvents> for ActorSupervisor {
             .events
             .query(Some("actor_message"), None, None, query_limit);
         events.reverse();
+        let registry = &self.registry;
         Ok(events
             .into_iter()
-            .filter(|event| {
+            .filter_map(|event| {
                 let recipient = event
                     .payload
                     .get("recipient")
                     .and_then(Value::as_str)
                     .unwrap_or_default();
                 if recipient != message.principal_id {
-                    return false;
+                    return None;
                 }
                 let channel = event
                     .payload
@@ -839,18 +840,28 @@ impl Message<PrincipalTaskUpdateEvents> for ActorSupervisor {
                     .or_else(|| event.payload.get("kind"))
                     .and_then(Value::as_str)
                     .unwrap_or_default();
-                channel == "task_update"
-                    && MessageIntent::from_strings(channel, kind).wakes_cortex()
-            })
-            .take(message.limit.max(1))
-            .map(|event| {
-                let actor_name = self
-                    .registry
+                if channel != "task_update"
+                    || !MessageIntent::from_strings(channel, kind).wakes_cortex()
+                {
+                    return None;
+                }
+                let actor_name = registry
                     .get(&event.actor_id)
                     .map(|actor| actor.config.name.clone())
                     .unwrap_or_else(|| event.actor_id.clone());
-                ActorNamedEvent { event, actor_name }
+                // DMN reflection is internal — its task_update progress
+                // messages would otherwise wake cortex via the
+                // actor-update-monitor → cortex chat_once → Telegram path,
+                // and cortex parrots the verbose reflection back to the
+                // user. DMN's legitimate user-facing signals go through
+                // user_notify (gated by review_notifications_with_llm),
+                // not through task_update.
+                if actor_name == crate::actor::background::DMN_ACTOR_NAME {
+                    return None;
+                }
+                Some(ActorNamedEvent { event, actor_name })
             })
+            .take(message.limit.max(1))
             .collect())
     }
 }

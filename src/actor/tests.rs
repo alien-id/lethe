@@ -460,3 +460,48 @@ async fn runtime_returns_principal_task_update_events() {
     );
     assert_eq!(events[1].event.payload.get("intent"), Some(&json!("done")));
 }
+
+#[tokio::test]
+async fn runtime_excludes_dmn_task_updates_to_avoid_reflection_leak() {
+    let (mut registry, principal, worker) = registry_with_principal_and_worker();
+    let mut dmn_config = ActorConfig::new(
+        crate::actor::background::DMN_ACTOR_NAME,
+        "Background reflection",
+    )
+    .in_group("main");
+    dmn_config.persistent = true;
+    let dmn = registry.spawn(dmn_config, Some(&principal), false);
+
+    let mut progress_meta = serde_json::Map::new();
+    progress_meta.insert("channel".to_string(), json!("task_update"));
+    progress_meta.insert("kind".to_string(), json!("progress"));
+    registry
+        .send_to(
+            &dmn,
+            &principal,
+            "Background reflection summary that must not surface",
+            None,
+            progress_meta.clone(),
+            None,
+        )
+        .unwrap();
+    registry
+        .send_to(
+            &worker,
+            &principal,
+            "Worker progress that should reach cortex",
+            None,
+            progress_meta,
+            None,
+        )
+        .unwrap();
+
+    let runtime = ActorRuntime::new(registry);
+    let events = runtime
+        .principal_task_update_events(&principal, 10)
+        .await
+        .unwrap();
+
+    assert_eq!(events.len(), 1, "only the non-DMN update should pass");
+    assert_eq!(events[0].actor_name, "researcher");
+}
