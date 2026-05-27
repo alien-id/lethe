@@ -748,66 +748,16 @@ fn history_to_llm_messages(history: Vec<StoredMessage>) -> Vec<LlmMessage> {
                 out.push(LlmMessage::user(history_content_with_timestamp(&message)));
             }
             MessageRole::Assistant => {
-                let calls = extract_historical_tool_calls(&message.metadata);
-                let intended_tool_calls =
-                    MessageMetadata::from_value(Some(&message.metadata)).has_tool_calls();
-                if calls.is_empty() {
-                    // The model was reported to have made tool calls but the
-                    // payload is missing call_ids — we can't reconstruct a
-                    // valid pair, so drop the chatter entirely instead of
-                    // surfacing it as plain narration.
-                    if intended_tool_calls {
-                        continue;
-                    }
-                    if !message.content.trim().is_empty() {
-                        out.push(LlmMessage::assistant(message.content));
-                    }
-                    continue;
+                // Fast/safe provider-compatibility fix: do not replay old tool
+                // calls as native tool_use/function_call messages. Some
+                // OpenAI-compatible providers reject historical tool IDs even
+                // when Lethe reconstructs adjacent tool results, causing every
+                // Telegram turn to fail before the model can answer. The live
+                // tool loop still uses native tool calls; only durable history
+                // is flattened to visible assistant text here.
+                if !message.content.trim().is_empty() {
+                    out.push(LlmMessage::assistant(message.content));
                 }
-
-                // Collect the tool results that should follow this assistant
-                // message. Anthropic requires every tool_use_id to have a
-                // matching tool_result in the very next user message; we
-                // greedily consume Tool-role messages while they match a
-                // pending call_id.
-                let expected: std::collections::HashSet<String> =
-                    calls.iter().map(|call| call.call_id.clone()).collect();
-                let mut responses: Vec<HistoricalToolResponse> = Vec::new();
-                let mut seen: std::collections::HashSet<String> =
-                    std::collections::HashSet::new();
-                while let Some(next) = iter.peek() {
-                    if !matches!(next.role, MessageRole::Tool) {
-                        break;
-                    }
-                    let Some(call_id) =
-                        next.metadata.get("tool_call_id").and_then(Value::as_str)
-                    else {
-                        // Tool message without a tool_call_id — orphan, skip.
-                        iter.next();
-                        continue;
-                    };
-                    if !expected.contains(call_id) {
-                        // Belongs to a different call group; stop consuming.
-                        break;
-                    }
-                    let call_id = call_id.to_string();
-                    let tool_msg = iter.next().expect("peeked tool message");
-                    if seen.insert(call_id.clone()) {
-                        responses.push(HistoricalToolResponse {
-                            call_id,
-                            content: tool_msg.content,
-                            source_message_id: Some(tool_msg.id),
-                        });
-                    }
-                }
-
-                // Drop the whole pair if any tool_use_id is missing its
-                // response — Anthropic 400s on a mismatched id list.
-                if seen.len() != expected.len() {
-                    continue;
-                }
-                out.push(LlmMessage::assistant_with_tool_calls(message.content, calls));
-                out.push(LlmMessage::tool_results(responses));
             }
             // Orphaned tool result (no preceding assistant tool_call). Skip.
             MessageRole::Tool => continue,
