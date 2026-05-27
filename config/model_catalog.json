@@ -1,12 +1,13 @@
 {
-  "_updated": "2026-04-22",
-  "_note": "Curated model catalog for /model and /aux commands. Only recent models (≤5mo), tool-capable, ≥100k ctx.",
+  "_updated": "2026-05-27",
+  "_note": "Curated model catalog for /model and /aux commands. Only recent models (≤5mo), tool-capable, ≥100k ctx. First entry per list is the wizard default.",
   "openrouter": {
     "main": [
       ["Kimi K2.6", "openrouter/moonshotai/kimi-k2.6", "$0.60/$2.80"],
       ["Claude Opus 4.7", "openrouter/anthropic/claude-opus-4.7", "$5/$25"],
       ["Claude Sonnet 4.6", "openrouter/anthropic/claude-sonnet-4.6", "$3/$15"],
       ["Gemini 3.1 Pro", "openrouter/google/gemini-3.1-pro-preview", "$2/$12"],
+      ["GPT-5.5", "openrouter/openai/gpt-5.5", "$5/$30"],
       ["GPT-5.4", "openrouter/openai/gpt-5.4", "$2.50/$15"],
       ["GLM 5.1", "openrouter/z-ai/glm-5.1", "$1.20/$4"],
       ["Kimi K2.5", "openrouter/moonshotai/kimi-k2.5", "$0.42/$2.20"],
@@ -36,16 +37,17 @@
   },
   "openai": {
     "main": [
+      ["GPT-5.5", "gpt-5.5", "$5/$30"],
+      ["GPT-5.5 Pro", "gpt-5.5-pro", "$30/$180"],
       ["GPT-5.4", "gpt-5.4", "$2.50/$15"],
       ["GPT-5.4 Pro", "gpt-5.4-pro", "$5/$30"],
       ["GPT-5.3 Codex", "gpt-5.3-codex", "$2/$12"],
-      ["GPT-5.2", "gpt-5.2", "$1.75/$14"],
       ["GPT-5.4 Mini", "gpt-5.4-mini", "$0.75/$4.50"]
     ],
     "aux": [
-      ["GPT-5.4 Nano", "gpt-5.4-nano", "$0.20/$1.25"],
       ["GPT-5.4 Mini", "gpt-5.4-mini", "$0.75/$4.50"],
-      ["GPT-5 Mini", "gpt-5-mini", "$0.25/$2"]
+      ["GPT-5.4 Nano", "gpt-5.4-nano", "$0.20/$1.25"],
+      ["GPT-4.1 Nano", "gpt-4.1-nano", "$0.10/$0.40"]
     ]
   }
 }

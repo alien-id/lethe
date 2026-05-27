@@ -25,6 +25,16 @@ lethe chat -m "hello"
 
 `lethe init` writes `~/.lethe/config/.env`, seeds the workspace and core memory blocks, and runs a smoke test against the LLM and embedding pipeline before declaring success. If you'd rather configure by hand, copy `.env.example` and edit. The first turn that uses recall/notes triggers a one-time ~150MB download of the embedding runtime and model (progress is shown).
 
+To sign in (or re-auth) a single provider without re-running the full wizard, use `lethe login`:
+
+```bash
+lethe login openai       # asks: ChatGPT Plus/Pro subscription (default) or API key
+lethe login anthropic    # asks: Claude Pro/Max subscription (default) or API key
+lethe login openrouter   # API key only
+```
+
+Each command writes credentials to `~/.lethe/credentials/` (subscription) or sets the API key in `~/.lethe/config/.env`, flips `LLM_PROVIDER`, and prompts for `LLM_MODEL` / `LLM_MODEL_AUX` (defaults from the curated catalog — accept with Enter, or type any other model id).
+
 Sanity-check an existing setup any time with `lethe check` — it pings the model and exercises the embedding pipeline rather than just printing config.
 
 ## Architecture
@@ -60,8 +70,8 @@ Core runtime pieces:
 | Area | Rust modules | Responsibility |
 |------|--------------|----------------|
 | Agent/cortex | `src/agent.rs` | Prompt assembly, LLM calls, tool loop, and actor turn execution. |
-| LLM routing | `src/llm.rs`, `src/models.rs` | `genai` client, OpenRouter/local API base normalization, model metadata. |
-| Memory | `src/store.rs`, `src/memory.rs`, `src/notes.rs`, `src/archival.rs`, `src/messages.rs`, `src/semantic.rs` | Markdown memory blocks, compatible LanceDB recall tables, and SQLite todos. |
+| LLM routing | `src/llm/` | `genai` client, OAuth (ChatGPT Plus/Pro, Claude Pro/Max) and API-key auth, OpenRouter prompt-cache forwarding via vendored genai patch, model metadata. |
+| Memory | `src/memory/` | Markdown memory blocks, SQLite-vec recall tables (`memory`, `message_history`, plus their `*_vec` virtual siblings), SQLite todos. |
 | Recall | `src/hippocampus.rs` | Hybrid lexical/vector recall over notes, archival memories, and conversation history. |
 | Actors | `src/actor.rs`, `src/background.rs` | Resident Kameo actors, supervisor-owned state, mailbox/event routing, autonomous subagent wakeups, persistent DMN. |
 | Notifications | `src/notification.rs`, `src/heartbeat.rs`, `src/runtime.rs` | Background candidate gating and proactive output limits. |
@@ -128,20 +138,35 @@ API mode binds to `LETHE_API_HOST` (`127.0.0.1` by default). Use a reverse proxy
 
 ## LLM Providers
 
-Lethe routes chat through `genai`. The Rust runtime supports API-key based providers and OpenAI-compatible local servers:
+Lethe routes chat through `genai`. The runtime supports both API-key and subscription-OAuth auth, plus OpenAI-compatible local servers:
 
 | Provider | Auth | Example `LLM_MODEL` |
 |----------|------|---------------------|
-| Anthropic | `ANTHROPIC_API_KEY` or Claude subscription OAuth token file | `claude-opus-4-6` |
-| OpenAI | `OPENAI_API_KEY` | `gpt-5.4` |
+| Anthropic (API key) | `ANTHROPIC_API_KEY` | `claude-opus-4-7` |
+| Anthropic (Claude Pro/Max) | `lethe login anthropic` → token file | `claude-opus-4-7` |
+| OpenAI (API key) | `OPENAI_API_KEY` | `gpt-5.5` |
+| OpenAI (ChatGPT Plus/Pro) | `lethe login openai` → token file | `gpt-5.5` |
 | OpenRouter | `OPENROUTER_API_KEY` | `openrouter/moonshotai/kimi-k2.6` |
 | Local OpenAI-compatible | `LLM_API_BASE` + `OPENAI_API_KEY=local` | `openai/gemma-4-31B-it-Q8_0.gguf` |
 
-`LLM_PROVIDER` is optional. It is useful when a model id does not carry a provider prefix, for example `LLM_PROVIDER=openrouter` with `LLM_MODEL=moonshotai/kimi-k2.6`.
+`LLM_PROVIDER` is optional but useful when a model id does not carry a provider prefix — for example `LLM_PROVIDER=openrouter` with `LLM_MODEL=moonshotai/kimi-k2.6`. Subscription auth also requires `LLM_PROVIDER=openai` or `LLM_PROVIDER=anthropic` so the router picks the OAuth path instead of looking for an API key (the `lethe login` commands set this for you).
 
 `LLM_MODEL_AUX` defaults to the main model and is used for lightweight/background calls.
 
-For Anthropic subscription/OAuth mode, Lethe reads `ANTHROPIC_AUTH_TOKEN` directly or a Claude token file from `LETHE_ANTHROPIC_OAUTH_TOKENS`. When that variable is unset, it falls back to `$CREDENTIALS_DIR/anthropic_oauth_tokens.json`.
+### Subscription OAuth
+
+`lethe login openai` runs a device-code flow against `auth.openai.com`; tokens land in `~/.lethe/credentials/openai_oauth_tokens.json`. Calls then go to the Codex Responses API at `chatgpt.com/backend-api/codex/responses` using your ChatGPT Plus/Pro session — no `OPENAI_API_KEY` needed. Override the token file with `LETHE_OPENAI_OAUTH_TOKENS` or supply a raw token via `OPENAI_AUTH_TOKEN`.
+
+`lethe login anthropic` runs a PKCE browser flow against `claude.ai/oauth/authorize`; tokens land in `~/.lethe/credentials/anthropic_oauth_tokens.json`. Override with `LETHE_ANTHROPIC_OAUTH_TOKENS` or `ANTHROPIC_AUTH_TOKEN`.
+
+### Prompt caching
+
+Lethe stamps cache breakpoints on the system prompt (1h-TTL persistent prefix + 5min-TTL ephemeral tail) and forwards them through to:
+
+- **Anthropic direct** and **Anthropic OAuth** — cache_control is emitted on system blocks.
+- **OpenRouter** — cache_control is emitted on system content parts, which OpenRouter forwards to upstream providers that support explicit caching (Anthropic, Qwen, Gemini explicit). Providers with automatic prefix caching (OpenAI, Grok, Moonshot/Kimi, Groq, DeepSeek, Gemini implicit) ignore the field but benefit from the stable structured shape.
+
+Both `genai`'s native OpenAI adapter and our vendored fork now carry the patch — see [`vendor/genai/LETHE_FORK.md`](vendor/genai/LETHE_FORK.md) for the patch surface.
 
 ## Configuration
 
@@ -168,9 +193,11 @@ Configuration is read from process environment, a local `.env`, and `$LETHE_HOME
 | `LLM_CONTEXT_LIMIT` | Context size hint | `100000` |
 | `OPENROUTER_API_KEY` | OpenRouter key | unset |
 | `ANTHROPIC_API_KEY` | Anthropic key | unset |
-| `ANTHROPIC_AUTH_TOKEN` | Optional Anthropic OAuth access token | unset |
-| `LETHE_ANTHROPIC_OAUTH_TOKENS` | Optional Anthropic OAuth token file or directory | `$CREDENTIALS_DIR/anthropic_oauth_tokens.json` |
+| `ANTHROPIC_AUTH_TOKEN` | Optional Anthropic OAuth access token (raw) | unset |
+| `LETHE_ANTHROPIC_OAUTH_TOKENS` | Optional Anthropic OAuth token file | `$CREDENTIALS_DIR/anthropic_oauth_tokens.json` |
 | `OPENAI_API_KEY` | OpenAI/local-compatible key | unset |
+| `OPENAI_AUTH_TOKEN` | Optional OpenAI OAuth access token (raw) | unset |
+| `LETHE_OPENAI_OAUTH_TOKENS` | Optional OpenAI OAuth token file | `$CREDENTIALS_DIR/openai_oauth_tokens.json` |
 | `EXA_API_KEY` | Exa search/fetch tools | unset |
 | `LETHE_SEMANTIC_SEARCH_ENABLED` | Enable LanceDB vector search | `true` |
 | `LETHE_EMBEDDING_PROVIDER` | `fastembed` or `hash` | `fastembed` |
@@ -195,8 +222,10 @@ Lethe stores runtime state under the workspace and data directories:
 - `workspace/memory/human.md` -- facts about the user.
 - `workspace/memory/project.md` -- current project/context.
 - `workspace/notes/` -- tagged markdown notes.
-- `$MEMORY_DIR/lancedb/` -- LanceDB tables `archival_memory`, `message_history`, and `notes` using the existing compatible schema.
+- `$MEMORY_DIR/lethe-memory.db` -- SQLite-vec database with `memory` (archival + notes, with `note-<uuid>` and `mem-<uuid>` ids), `message_history`, and their `*_vec` virtual siblings for embedding search.
 - SQLite database at `$DB_PATH` -- todos.
+
+The legacy LanceDB layout at `$MEMORY_DIR/lancedb/` is what `lethe-migrate` reads from when upgrading a pre-0.19 install — see the *Migrating from v0.18* section below.
 
 Core memory block defaults and prompt templates are embedded into the binary, so `lethe check` and first startup work without copying prompt files into the workspace.
 
