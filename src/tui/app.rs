@@ -27,7 +27,7 @@ use tokio::task::JoinHandle;
 use tui_textarea::{Input, Key, TextArea};
 
 use crate::tui::autocomplete::Autocomplete;
-use crate::tui::client::LetheClient;
+use crate::tui::client::{LetheClient, PreflightError};
 use crate::tui::events::UiEvent;
 use crate::tui::state::{AppState, Pane};
 use crate::tui::view;
@@ -47,15 +47,32 @@ pub async fn run(opts: TuiOptions) -> Result<()> {
     let client = LetheClient::new(opts.base_url.clone(), opts.token.clone())
         .context("build lethe client")?;
 
-    if let Err(error) = client.health().await {
-        return Err(anyhow!(
-            "cannot reach lethe API at {}: {error}\nIs `lethe api` running and is LETHE_API_TOKEN correct?",
-            opts.base_url
-        ));
-    }
+    // Fail-fast preflight against an auth-required endpoint. We do this
+    // *before* entering the alternate screen so any error renders as a
+    // plain stderr line, not as half-painted UI behind a 401 spinner.
+    let initial_model = match client.preflight().await {
+        Ok(info) => Some(info),
+        Err(PreflightError::Unauthorized) => {
+            return Err(anyhow!(
+                "lethe tui: API at {} rejected the bearer token (401). \
+                 Set LETHE_API_TOKEN to match what `lethe api` is using, \
+                 or pass --token <value>.",
+                opts.base_url
+            ));
+        }
+        Err(PreflightError::Unreachable { url, source }) => {
+            return Err(anyhow!(
+                "lethe tui: cannot reach API at {url}: {source}\n\
+                 Is `lethe api` running? Check `systemctl --user status lethe`."
+            ));
+        }
+        Err(PreflightError::Other(error)) => {
+            return Err(anyhow!("lethe tui: API preflight failed: {error}"));
+        }
+    };
 
     let mut terminal = enter_terminal()?;
-    let result = drive(&mut terminal, client, opts.workspace).await;
+    let result = drive(&mut terminal, client, opts.workspace, initial_model).await;
     leave_terminal(&mut terminal)?;
     result
 }
@@ -81,7 +98,12 @@ fn leave_terminal(terminal: &mut Term) -> Result<()> {
     Ok(())
 }
 
-async fn drive(terminal: &mut Term, client: LetheClient, workspace: PathBuf) -> Result<()> {
+async fn drive(
+    terminal: &mut Term,
+    client: LetheClient,
+    workspace: PathBuf,
+    initial_model: Option<crate::tui::client::ModelInfo>,
+) -> Result<()> {
     let mut app = AppState::new();
     let mut editor = make_editor();
     let autocomplete = Autocomplete::new(&workspace);
@@ -96,9 +118,11 @@ async fn drive(terminal: &mut Term, client: LetheClient, workspace: PathBuf) -> 
         let _ = events_client.events_stream(events_tx).await;
     });
 
-    // Initial model + actors + todos load.
-    if let Ok(info) = client.model().await {
-        app.set_model(info.model.clone(), info.provider.clone());
+    // Use the model info captured by preflight so the footer paints
+    // correctly from the first frame, no follow-up GET needed.
+    if let Some(info) = initial_model {
+        app.set_model(info.model, info.provider);
+        app.status = crate::tui::state::Status::Idle;
     }
     refresh_sidebar(&client, &cmd_tx).await;
 

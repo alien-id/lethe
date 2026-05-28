@@ -30,6 +30,22 @@ pub struct ModelInfo {
     pub provider: String,
 }
 
+/// Failure modes the TUI startup wants to discriminate so it can render
+/// a clean, single-line message *before* taking over the terminal.
+#[derive(Debug, thiserror::Error)]
+pub enum PreflightError {
+    #[error("API at {url} is unreachable: {source}")]
+    Unreachable {
+        url: String,
+        #[source]
+        source: anyhow::Error,
+    },
+    #[error("API rejected the bearer token (HTTP 401). Check LETHE_API_TOKEN.")]
+    Unauthorized,
+    #[error("API check failed: {0}")]
+    Other(#[source] anyhow::Error),
+}
+
 impl LetheClient {
     pub fn new(base_url: impl Into<String>, token: impl Into<String>) -> Result<Self> {
         let http = Client::builder()
@@ -62,6 +78,43 @@ impl LetheClient {
             .error_for_status()?;
         let _ = response.text().await?;
         Ok(())
+    }
+
+    /// Pre-flight check that the server is up *and* our token is
+    /// accepted. Hits an auth-required endpoint so a wrong/missing
+    /// token surfaces here, before we enter the alternate screen and
+    /// hide the error behind a half-painted UI. Returns
+    /// [`PreflightError`] with the specific failure mode so the caller
+    /// can render a clean message and exit.
+    pub async fn preflight(&self) -> Result<ModelInfo, PreflightError> {
+        // Health first: a connection refused / DNS failure is far more
+        // common than a token issue and produces a better error.
+        if let Err(error) = self.health().await {
+            return Err(PreflightError::Unreachable {
+                url: self.base_url.clone(),
+                source: anyhow::anyhow!(error.to_string()),
+            });
+        }
+        let url = format!("{}/model", self.base_url);
+        let response = match self.auth(self.http.get(url)).send().await {
+            Ok(response) => response,
+            Err(error) => {
+                return Err(PreflightError::Unreachable {
+                    url: self.base_url.clone(),
+                    source: anyhow::anyhow!(error.to_string()),
+                });
+            }
+        };
+        if response.status() == reqwest::StatusCode::UNAUTHORIZED {
+            return Err(PreflightError::Unauthorized);
+        }
+        match response.error_for_status() {
+            Ok(ok) => ok
+                .json::<ModelInfo>()
+                .await
+                .map_err(|error| PreflightError::Other(anyhow::anyhow!(error.to_string()))),
+            Err(error) => Err(PreflightError::Other(anyhow::anyhow!(error.to_string()))),
+        }
     }
 
     pub async fn model(&self) -> Result<ModelInfo> {
