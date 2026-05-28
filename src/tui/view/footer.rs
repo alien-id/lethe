@@ -61,7 +61,7 @@ pub fn draw(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
     }
     spans.push(Span::raw("    "));
     spans.push(Span::styled(
-        "Tab cycle · Ctrl-B sidebar · Ctrl-C quit · /help",
+        "PgUp/PgDn scroll · Ctrl-Home/End jump · Tab pane · Ctrl-B sidebar · Ctrl-C quit · /help",
         Style::default().fg(Color::Gray),
     ));
     frame.render_widget(Paragraph::new(Line::from(spans)), area);

@@ -518,6 +518,12 @@ async fn handle_slash_command(
             app.push_notice(
                 "commands: /help · /clear · /cancel · /todos · /actors · /model [name] · /quit",
             );
+            app.push_notice(
+                "keys: Enter send · Shift+Enter newline · @ file complete · Tab cycle pane · Esc cancel turn",
+            );
+            app.push_notice(
+                "scroll: PgUp/PgDn (10 lines) · Ctrl-Up/Down (2 lines) · Ctrl-Home/End (top/bottom) · mouse wheel",
+            );
         }
         SlashCommand::Clear => {
             app.transcript.clear();

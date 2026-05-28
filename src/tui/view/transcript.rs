@@ -30,19 +30,20 @@ pub fn draw(frame: &mut Frame<'_>, area: Rect, app: &mut AppState) {
         lines.push(thinking_line(app.tick));
     }
 
-    let total = lines.len() as u16;
+    let paragraph = Paragraph::new(Text::from(lines)).wrap(Wrap { trim: false });
+    // Wrapped line count, not raw `lines.len()` — a 200-char paragraph
+    // in an 80-col pane occupies 3 visual rows but is one entry in
+    // `lines`. Without this the scroll calc undercounted by however
+    // many lines wrapped, and the transcript appeared to "not scroll"
+    // when in fact it just hadn't realised it had overflowed.
+    let total = paragraph.line_count(inner.width) as u16;
     let visible = inner.height;
-    let scroll = if total > visible {
-        total
-            .saturating_sub(visible)
-            .saturating_sub(app.transcript_scroll)
-    } else {
-        0
-    };
-    let paragraph = Paragraph::new(Text::from(lines))
-        .wrap(Wrap { trim: false })
-        .scroll((scroll, 0));
-    frame.render_widget(paragraph, inner);
+    let max_scroll = total.saturating_sub(visible);
+    // Clamp the user's requested scroll so they can't scroll past the
+    // top of the buffer.
+    app.transcript_scroll = app.transcript_scroll.min(max_scroll);
+    let scroll = max_scroll.saturating_sub(app.transcript_scroll);
+    frame.render_widget(paragraph.scroll((scroll, 0)), inner);
 }
 
 fn thinking_line(tick: u64) -> Line<'static> {
