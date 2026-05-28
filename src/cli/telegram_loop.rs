@@ -773,18 +773,7 @@ fn actor_update_synthetic_message(updates: &[ActorNamedEvent]) -> String {
     ];
     for update in updates {
         let kind = actor_update_kind(update);
-        let preview = update
-            .event
-            .payload
-            .get("content_preview")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_default()
-            .trim();
-        lines.push(format!(
-            "- {} ({kind}): {}",
-            update.actor_name,
-            truncate_context_text(preview, 240)
-        ));
+        lines.push(format!("- {} ({kind})", update.actor_name));
     }
     lines.push("</updates>".to_string());
     lines.push(String::new());
@@ -814,14 +803,6 @@ fn actor_update_kind(update: &ActorNamedEvent) -> &str {
 
 fn actor_update_is_terminal(kind: &str) -> bool {
     matches!(kind, "done" | "failed" | "error" | "max_turns")
-}
-
-fn truncate_context_text(value: &str, limit: usize) -> String {
-    let mut truncated = value.chars().take(limit).collect::<String>();
-    if value.chars().count() > limit {
-        truncated.push_str("...[truncated]");
-    }
-    truncated
 }
 
 async fn process_telegram_once(
