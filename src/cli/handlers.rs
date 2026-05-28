@@ -99,7 +99,12 @@ pub(crate) async fn tui_command(url: Option<String>, token: Option<String>) -> R
     let base_url = url.unwrap_or_else(|| {
         format!("http://{}:{}", settings.api.host, settings.api.port)
     });
+    // Order: explicit --token > non-empty LETHE_API_TOKEN env > value
+    // from ~/.lethe/config/.env. Treat an empty-string env var as
+    // unset so a stale `export LETHE_API_TOKEN=` in the user's shell
+    // doesn't shadow the value the service actually started with.
     let token = token
+        .filter(|value| !value.trim().is_empty())
         .or_else(|| {
             let configured = settings.api.token.trim().to_string();
             (!configured.is_empty()).then_some(configured)
