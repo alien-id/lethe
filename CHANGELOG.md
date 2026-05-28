@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.21.1 - TUI polish: scroll, history seed, preflight
+
+- **Transcript scrolling**: switched scroll math to ratatui's wrapped
+  line count (`Paragraph::line_count`, gated behind
+  `unstable-rendered-line-info`). The previous calc counted raw
+  `lines.len()`, so wrapped paragraphs lied about overflow and the
+  transcript appeared frozen at the bottom. Mouse wheel,
+  `PgUp/PgDn`, `Ctrl-Up/Down`, `Ctrl-Home/End`, and (with the
+  transcript pane focused) bare `Up/Down/Home/End` all scroll now.
+- **History seed on startup**: TUI pulls `/session/history?limit=50`,
+  filters internal-visibility rows (heartbeats, DMN reflections,
+  actor updates) and tool/system entries, then seeds the transcript
+  with the last 5 user↔assistant exchanges.
+- **Preflight + clean error**: `client.preflight()` hits an
+  auth-required endpoint before `enter_terminal()`, so a 401 / bad
+  URL prints a single-line error to stderr and exits without
+  taking over the screen.
+- **`LETHE_API_TOKEN=` empty in shell**: treated as unset so a stale
+  shell export doesn't shadow the value in `~/.lethe/config/.env`.
+- **Brighter palette over SSH**: replaced every `Color::DarkGray`
+  (terminal color 8, often invisible on remote sessions) with
+  `Color::Gray` and dropped `Modifier::DIM` from tool args, due
+  dates, sidebar IDs, footer hints, and the thinking label.
+- **Scroll keys visible**: footer now shows
+  `PgUp/PgDn scroll · Ctrl-Home/End jump · Tab pane · Ctrl-B sidebar · Ctrl-C quit · /help`,
+  and `/help` lists the full key + scroll vocabulary.
+
 ## 0.21.0 - TUI client, streaming, Brainstem
 
 - **Terminal UI** (`lethe tui`). New ratatui-based client that talks to a local `lethe api` over HTTP+SSE: transcript pane with inline tool cards, right sidebar with the actors tree and todos, streaming assistant text with a visible thinking spinner, `@`-prefix workspace path autocomplete, and slash commands (`/help`, `/clear`, `/cancel`, `/todos`, `/actors`, `/model`, `/quit`). See `src/tui/`.
