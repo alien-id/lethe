@@ -7,6 +7,7 @@ RUN apt-get update \
         pkg-config \
         protobuf-compiler \
         libprotobuf-dev \
+        libssl-dev \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /opt/lethe
