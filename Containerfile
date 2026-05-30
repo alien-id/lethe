@@ -13,6 +13,7 @@ RUN apt-get update \
 WORKDIR /opt/lethe
 
 COPY Cargo.toml Cargo.lock ./
+COPY .cargo/ ./cargo
 COPY config/ config/
 COPY src/ src/
 COPY vendor/ vendor/
