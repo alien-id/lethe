@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.22.3 - Telegram reaction replies
+
+- **Respond to reactions on her own messages**: when you react to a Telegram
+  message Lethe sent, she now takes a turn and answers — but only when a reply
+  is warranted, staying silent otherwise. She tracks the messages she sends (in
+  a bounded per-process log, shared with the tool send path) so reactions can be
+  attributed to her own messages; reactions on anything else are still just
+  recorded to memory as before.
+
 ## 0.22.2 - OpenAI OAuth reliability + context cap
 
 - **OpenAI OAuth stream reliability** (#22, thanks @voldmar): trim oversized
