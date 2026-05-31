@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.22.1 - Bug fixes
+
+- **TUI: no more duplicated replies**: a streamed assistant message was
+  rendered twice — once as the streamed `---`-split bubbles, then again
+  in full when the turn-final `text` echo arrived. The echo-suppression
+  matched the streamed tail against the re-split segments by string, which
+  missed whenever a trailing `---` divider sealed the stream or the
+  provider normalized the final body, re-rendering the whole reply. The
+  TUI now drops the final echo outright whenever the turn streamed; only
+  non-streaming turns push the text.
+- **Container builds from source actually work** (#22, thanks @voldmar):
+  copy the vendored `genai` crate and add `libssl-dev` so `cargo build`
+  resolves; pin `rust:1.96-slim` for reproducible images and drop a dead
+  `.cargo` COPY. Adds a `--force` flag to `container up`/`rebuild` to
+  replace an already-installed service unit.
+
 ## 0.22.0 - Container-first CLI
 
 - **Isolated container by default**: `lethe init` now deploys Lethe
