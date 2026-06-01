@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.22.4 - Telegram interactive keyboards
+
+- **Inline & reply keyboards** (#24, thanks @voldmar): the assistant can now
+  attach a Telegram `reply_markup` to its messages — inline buttons for
+  message-scoped actions (callback presses are parsed into assistant-visible
+  context, answered, and the keyboard is removed after the press) and reply
+  keyboards for quick short replies (removed once a matching button text
+  arrives).
+- **Hardening on merge**: route callback presses even when the original message
+  is no longer accessible (>48h old), accept `reply_markup_json` as either a
+  JSON string or a raw object, match callback data robustly, and drop two
+  non-Bot-API button fields that could otherwise trigger send errors.
+
 ## 0.22.3 - Telegram reaction replies
 
 - **Respond to reactions on her own messages**: when you react to a Telegram
