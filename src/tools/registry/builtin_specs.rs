@@ -1,4 +1,5 @@
 use serde_json::Value;
+use std::env;
 
 use crate::tools::registry::ToolRegistry;
 use crate::tools::registry::args::{
@@ -22,6 +23,36 @@ const TODO_PRIORITY_VALUES: &[&str] = &["low", "normal", "high", "urgent"];
 fn exec_request_tool(_registry: &ToolRegistry<'_>, _args: &Value) -> String {
     // Handled inline by the agent tool loop before dispatch is reached.
     "Error: request_tool must be intercepted by the tool loop.".to_string()
+}
+
+fn exec_mini_app_public_url(registry: &ToolRegistry<'_>, args: &Value) -> String {
+    let app_name = string_arg(args, "app_name");
+    let slug = crate::mini_app::static_mini_app_slug(&app_name);
+    let path = crate::mini_app::static_mini_app_index_path(registry.memory.workspace_dir(), &slug);
+    if !path.is_file() {
+        return format!("Error: Mini App artifact not found: {}", path.display());
+    }
+
+    let public_base_url = string_arg_default(args, "public_base_url", "");
+    let public_base_url = if public_base_url.trim().is_empty() {
+        env::var("LETHE_PUBLIC_BASE_URL").unwrap_or_default()
+    } else {
+        public_base_url
+    };
+    let config = crate::config::MiniAppConfig { public_base_url };
+    let base_url = match config.require_public_https_base_url() {
+        Ok(url) => url.to_string(),
+        Err(error) => return format!("Error: {error}"),
+    };
+    let url = crate::mini_app::static_mini_app_public_url(&base_url, &slug);
+    serde_json::to_string_pretty(&serde_json::json!({
+        "success": true,
+        "app_name": app_name,
+        "slug": slug,
+        "path": path.display().to_string(),
+        "url": url,
+    }))
+    .unwrap()
 }
 
 fn exec_memory_read(registry: &ToolRegistry<'_>, args: &Value) -> String {
@@ -320,6 +351,16 @@ pub const TOOL_DEFS: &[ToolDef] = &[
         params: &[p_str_req("label", "Block label.")],
         category: ToolCategory::CortexOnly,
         execute: ToolExecutor::Sync(exec_memory_read),
+    },
+    ToolDef {
+        name: "mini_app_public_url",
+        description: "Resolve the public URL for a static Mini App artifact by name.",
+        params: &[
+            p_str_req("app_name", "Mini App name."),
+            p_str("public_base_url", "Optional public base URL override."),
+        ],
+        category: ToolCategory::Requestable,
+        execute: ToolExecutor::Sync(exec_mini_app_public_url),
     },
     ToolDef {
         name: "memory_list",

@@ -17,6 +17,7 @@ Hard constraints for `html`:
 - Must not perform network calls or backend calls.
 - Must not include `http://`, `https://`, `fetch`, `XMLHttpRequest`, dynamic `import()`, or `navigator.sendBeacon`.
 - Must not depend on any generated-app backend API.
+- If the app needs to send a result back to Lethe, use `window.Telegram?.WebApp?.sendData(JSON.stringify(payload))` from a button/action when available, and keep a graceful fallback when not.
 - Prefer accessible labels, clear controls, compact layout, and touch-friendly sizing.
 
 Input request:

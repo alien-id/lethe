@@ -409,6 +409,7 @@ pub fn router(state: ApiState) -> Router {
         .route("/configure", post(configure))
         .route("/model", get(model_get).post(model_post))
         .route("/events", get(events))
+        .route("/mini/{app_name}", get(static_mini_app))
         .route("/mini-apps/{slug}", get(mini_app_wrapper))
         .route("/telegram/mini-app/validate", post(validate_mini_app))
         .route("/file", get(serve_file))
@@ -483,6 +484,26 @@ async fn shutdown_signal() {
 
 async fn health() -> Json<Value> {
     Json(json!({"status": "ready"}))
+}
+
+async fn static_mini_app(
+    State(state): State<ApiState>,
+    AxumPath(app_name): AxumPath<String>,
+) -> Response {
+    let slug = crate::mini_app::static_mini_app_slug(&app_name);
+    let path = crate::mini_app::static_mini_app_index_path(&state.settings.paths.workspace_dir, &slug);
+    let html = match std::fs::read_to_string(&path) {
+        Ok(html) => html,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return json_error(StatusCode::NOT_FOUND, &format!("mini app not found: {slug}"));
+        }
+        Err(error) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
+    };
+    let mut response = html_response(html);
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store, max-age=0"));
+    response
 }
 
 #[derive(Debug, Deserialize)]
@@ -620,6 +641,10 @@ fn html_response(html: String) -> Response {
     headers.insert(
         header::REFERRER_POLICY,
         HeaderValue::from_static("no-referrer"),
+    );
+    headers.insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("no-store, max-age=0"),
     );
     response
 }
@@ -1145,6 +1170,7 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
+    use axum::body::to_bytes;
     use axum::http::HeaderValue;
     use tempfile::tempdir;
     use tokio::sync::Notify;
@@ -1189,6 +1215,29 @@ mod tests {
             "ok.txt"
         );
         assert!(resolve_workspace_path(&workspace, "../outside.txt").is_none());
+    }
+
+    #[tokio::test]
+    async fn static_mini_app_serves_self_contained_html() {
+        let tmp = tempdir().unwrap();
+        let state = ApiState::from_settings(test_settings(tmp.path())).unwrap();
+        let path = crate::mini_app::static_mini_app_index_path(&state.settings.paths.workspace_dir, "calculator");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "<!doctype html><html><body><h1>calc</h1></body></html>").unwrap();
+
+        let response = static_mini_app(State(state), AxumPath("calculator".to_string())).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get(header::CONTENT_TYPE).unwrap(),
+            "text/html; charset=utf-8"
+        );
+        assert_eq!(
+            response.headers().get(header::X_CONTENT_TYPE_OPTIONS).unwrap(),
+            "nosniff"
+        );
+        assert_eq!(response.headers().get(header::CACHE_CONTROL).unwrap(), "no-store, max-age=0");
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        assert!(std::str::from_utf8(&body).unwrap().contains("<h1>calc</h1>"));
     }
 
     #[test]

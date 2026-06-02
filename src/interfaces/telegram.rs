@@ -451,6 +451,25 @@ impl TelegramUpdate {
         })
     }
 
+    pub fn incoming_web_app_data(&self) -> Option<IncomingTelegramWebAppData> {
+        let message = self.message.as_ref()?;
+        let from = message.from.as_ref()?;
+        let web_app_data = message.web_app_data.as_ref()?;
+        if web_app_data.button_text.trim().is_empty() || web_app_data.data.trim().is_empty() {
+            return None;
+        }
+        let parsed_json = serde_json::from_str::<Value>(&web_app_data.data).ok();
+        Some(IncomingTelegramWebAppData {
+            update_id: self.update_id,
+            chat_id: message.chat.id,
+            user_id: from.id,
+            message_id: message.message_id,
+            button_text: web_app_data.button_text.clone(),
+            data: web_app_data.data.clone(),
+            parsed_json,
+        })
+    }
+
     pub fn incoming_reaction(&self) -> Option<IncomingTelegramReaction> {
         let reaction = self.message_reaction.as_ref()?;
         let user = reaction.user.as_ref()?;
@@ -1065,6 +1084,14 @@ pub struct TelegramMessage {
     pub sticker: Option<TelegramStickerMedia>,
     #[serde(default)]
     pub reply_markup: Option<TelegramReplyMarkup>,
+    #[serde(default)]
+    pub web_app_data: Option<TelegramWebAppData>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct TelegramWebAppData {
+    pub button_text: String,
+    pub data: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -1155,6 +1182,17 @@ pub struct IncomingTelegramCallback {
     pub message_id: Option<i64>,
     pub data: String,
     pub button_text: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IncomingTelegramWebAppData {
+    pub update_id: i64,
+    pub chat_id: i64,
+    pub user_id: i64,
+    pub message_id: i64,
+    pub button_text: String,
+    pub data: String,
+    pub parsed_json: Option<Value>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1277,6 +1315,45 @@ impl IncomingTelegramCallback {
 
     pub fn metadata(&self) -> serde_json::Value {
         self.metadata_with_status(false, false, false)
+    }
+}
+
+impl IncomingTelegramWebAppData {
+    pub fn content(&self) -> String {
+        let mut content = format!(
+            "[Telegram Mini App data from: {}]\nData: {}",
+            self.button_text.trim(),
+            self.data.trim()
+        );
+        if let Some(parsed) = &self.parsed_json {
+            content.push_str("\nParsed JSON: ");
+            content.push_str(
+                &serde_json::to_string_pretty(parsed).unwrap_or_else(|_| parsed.to_string()),
+            );
+        }
+        content
+    }
+
+    pub fn metadata(&self) -> serde_json::Value {
+        let mut metadata = serde_json::Map::from_iter([
+            ("source".to_string(), json!("telegram_web_app_data")),
+            ("chat_id".to_string(), json!(self.chat_id)),
+            ("user_id".to_string(), json!(self.user_id)),
+            ("message_id".to_string(), json!(self.message_id)),
+            ("update_id".to_string(), json!(self.update_id)),
+            ("button_text".to_string(), json!(self.button_text)),
+            ("data".to_string(), json!(self.data)),
+        ]);
+        if let Some(parsed_json) = &self.parsed_json {
+            metadata.insert("parsed_json".to_string(), parsed_json.clone());
+        }
+        annotate_map(
+            &mut metadata,
+            MessageVisibility::UserVisible,
+            MessageKind::Chat,
+            "telegram",
+        );
+        serde_json::Value::Object(metadata)
     }
 }
 
@@ -2243,6 +2320,42 @@ mod tests {
     }
 
     #[test]
+    fn parses_web_app_data_update_with_json_payload() {
+        let raw = r#"{
+            "update_id": 45,
+            "message": {
+                "message_id": 7,
+                "chat": {"id": 100},
+                "from": {"id": 7},
+                "web_app_data": {
+                    "button_text": "Open calculator",
+                    "data": "{\"type\":\"calculator_result\",\"expression\":\"1+2\",\"result\":3}"
+                }
+            }
+        }"#;
+        let update: TelegramUpdate = serde_json::from_str(raw).unwrap();
+        let incoming = update.incoming_web_app_data().unwrap();
+
+        assert_eq!(incoming.update_id, 45);
+        assert_eq!(incoming.chat_id, 100);
+        assert_eq!(incoming.user_id, 7);
+        assert_eq!(incoming.message_id, 7);
+        assert_eq!(incoming.button_text, "Open calculator");
+        assert_eq!(
+            incoming.data,
+            r#"{"type":"calculator_result","expression":"1+2","result":3}"#
+        );
+        assert_eq!(
+            incoming.parsed_json.as_ref().unwrap()["type"],
+            "calculator_result"
+        );
+        assert!(incoming.content().contains("Parsed JSON"));
+        let metadata = incoming.metadata();
+        assert_eq!(metadata["button_text"], "Open calculator");
+        assert_eq!(metadata["parsed_json"]["result"], 3);
+    }
+
+    #[test]
     fn sent_message_log_records_and_matches_recent_messages() {
         let client = TelegramClient::new("token", vec![7]).unwrap();
         assert!(client.recent_sent_message(100, 5).is_none());
@@ -2652,6 +2765,35 @@ mod tests {
         let value = serde_json::to_value(&markup).unwrap();
         assert_eq!(value["one_time_keyboard"], true);
         assert_eq!(value["resize_keyboard"], true);
+    }
+
+    #[test]
+    fn reply_keyboard_web_app_button_serializes() {
+        let markup = TelegramReplyMarkup::ReplyKeyboardMarkup(ReplyKeyboardMarkup {
+            keyboard: vec![vec![ReplyKeyboardButton::Button(KeyboardButton {
+                text: "Open calculator".to_string(),
+                request_users: None,
+                request_chat: None,
+                request_managed_bot: None,
+                request_contact: None,
+                request_location: None,
+                request_poll: None,
+                web_app: Some(WebAppInfo {
+                    url: "https://example.test/mini/calculator".to_string(),
+                }),
+            })]],
+            is_persistent: None,
+            resize_keyboard: Some(true),
+            one_time_keyboard: Some(true),
+            input_field_placeholder: None,
+            selective: None,
+        });
+        let value = serde_json::to_value(&markup).unwrap();
+        assert_eq!(value["keyboard"][0][0]["text"], "Open calculator");
+        assert_eq!(
+            value["keyboard"][0][0]["web_app"]["url"],
+            "https://example.test/mini/calculator"
+        );
     }
 
     #[test]

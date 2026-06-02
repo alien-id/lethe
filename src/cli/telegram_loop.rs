@@ -1251,6 +1251,32 @@ async fn process_telegram_once(
             continue;
         }
 
+        if let Some(incoming) = update.incoming_web_app_data() {
+            if !client.user_allowed(incoming.user_id) {
+                continue;
+            }
+            last_chat_id = Some(incoming.chat_id);
+            handle_telegram_turn(
+                client,
+                agent,
+                settings,
+                options,
+                conversation_manager,
+                process_callback.clone(),
+                TelegramTurnInput {
+                    chat_id: incoming.chat_id,
+                    user_id: incoming.user_id,
+                    message_id: incoming.message_id,
+                    content: incoming.content(),
+                    metadata: Some(incoming.metadata()),
+                    attachments: Vec::new(),
+                },
+            )
+            .await?;
+            processed += 1;
+            continue;
+        }
+
         if let Some(incoming) = update.incoming_text() {
             if !client.user_allowed(incoming.user_id) {
                 continue;

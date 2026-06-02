@@ -46,6 +46,29 @@ fn exposes_core_tool_specs() {
     assert!(names.contains(&"todo_update".to_string()));
     assert!(names.contains(&"todo_remind_check".to_string()));
     assert!(names.contains(&"todo_reminded".to_string()));
+    assert!(names.contains(&"mini_app_public_url".to_string()));
+}
+
+#[test]
+fn mini_app_public_url_tool_returns_static_route_for_existing_artifacts() {
+    let (_tmp, memory, shell) = registry();
+    let registry = ToolRegistry::new(&memory, memory.workspace_dir(), "/tmp/lethe-cache", &shell);
+    let html_path = memory.workspace_dir().join("mini_apps/calculator/index.html");
+    std::fs::create_dir_all(html_path.parent().unwrap()).unwrap();
+    std::fs::write(&html_path, "<!doctype html><html><body>calc</body></html>").unwrap();
+
+    let payload = registry.execute(
+        "mini_app_public_url",
+        &json!({
+            "app_name": "calculator",
+            "public_base_url": "https://mini.example.test"
+        }),
+    );
+    let value: serde_json::Value = serde_json::from_str(&payload).unwrap();
+    assert_eq!(value["success"], true);
+    assert_eq!(value["slug"], "calculator");
+    assert_eq!(value["path"], html_path.display().to_string());
+    assert_eq!(value["url"], "https://mini.example.test/mini/calculator");
 }
 
 #[test]

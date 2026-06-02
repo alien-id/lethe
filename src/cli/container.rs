@@ -376,6 +376,8 @@ fn create_args(host_home: &str, mounts: &[String]) -> Vec<String> {
         a.push("-v".into());
         a.push(normalize_mount(m));
     }
+    a.push("-p".into());
+    a.push("127.0.0.1:1373:1373".into());
     a.push(IMAGE.into());
     a.push("api".into());
     a
@@ -938,6 +940,7 @@ mod tests {
         assert!(joined.contains("create --name lethe"));
         assert!(joined.contains("-v /home/x/.lethe:/root/.lethe"));
         assert!(joined.contains("-v /data:/data"));
+        assert!(joined.contains("-p 127.0.0.1:1373:1373"));
         assert!(joined.ends_with("lethe:latest api"));
         // No keep-id / non-root user → container runs as root so apt works.
         assert!(!joined.contains("keep-id"));

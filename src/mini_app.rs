@@ -45,6 +45,15 @@ pub struct MiniAppArtifact {
     pub html: String,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StaticMiniAppArtifact {
+    pub slug: String,
+    pub path: PathBuf,
+    pub url: String,
+}
+
+pub const STATIC_MINI_APPS_DIR: &str = "mini_apps";
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct MiniAppMetadata {
     pub title: String,
@@ -201,6 +210,49 @@ impl MiniAppStore {
         }
         Ok(path)
     }
+}
+
+pub fn static_mini_app_slug(app_name: &str) -> String {
+    slugify(app_name)
+}
+
+pub fn static_mini_app_root(settings: &Settings) -> PathBuf {
+    settings.paths.workspace_dir.join(STATIC_MINI_APPS_DIR)
+}
+
+pub fn static_mini_app_index_path(workspace_dir: &Path, app_name: &str) -> PathBuf {
+    workspace_dir
+        .join(STATIC_MINI_APPS_DIR)
+        .join(static_mini_app_slug(app_name))
+        .join("index.html")
+}
+
+pub fn static_mini_app_public_url(public_base_url: &str, app_name: &str) -> String {
+    format!(
+        "{}/mini/{}",
+        public_base_url.trim().trim_end_matches('/'),
+        static_mini_app_slug(app_name)
+    )
+}
+
+pub fn publish_static_mini_app(
+    workspace_dir: &Path,
+    public_base_url: &str,
+    app_name: &str,
+    html: &str,
+) -> MiniAppResult<StaticMiniAppArtifact> {
+    validate_html_safety(html)?;
+    let slug = static_mini_app_slug(app_name);
+    let path = static_mini_app_index_path(workspace_dir, &slug);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(&path, html)?;
+    Ok(StaticMiniAppArtifact {
+        slug: slug.clone(),
+        path,
+        url: static_mini_app_public_url(public_base_url, &slug),
+    })
 }
 
 pub fn parse_llm_artifact_json(raw: &str) -> MiniAppResult<MiniAppLlmArtifact> {
@@ -564,6 +616,39 @@ mod tests {
             artifact_url("https://mini.example.test/", "gradient-abc", "tok"),
             "https://mini.example.test/mini-apps/gradient-abc?token=tok"
         );
+    }
+
+    #[test]
+    fn static_mini_app_helpers_use_workspace_index_html() {
+        let tmp = tempfile::tempdir().unwrap();
+        let workspace = tmp.path().join("workspace");
+        let path = static_mini_app_index_path(&workspace, "Calculator App");
+        assert_eq!(
+            path,
+            workspace.join("mini_apps").join("calculator-app").join("index.html")
+        );
+        assert_eq!(
+            static_mini_app_public_url("https://mini.example.test/", "Calculator App"),
+            "https://mini.example.test/mini/calculator-app"
+        );
+    }
+
+    #[test]
+    fn publish_static_mini_app_writes_self_contained_html() {
+        let tmp = tempfile::tempdir().unwrap();
+        let workspace = tmp.path().join("workspace");
+        let published = publish_static_mini_app(
+            &workspace,
+            "https://mini.example.test",
+            "Calculator",
+            "<!doctype html><html><body><button>1</button></body></html>",
+        )
+        .unwrap();
+        assert_eq!(published.slug, "calculator");
+        assert_eq!(published.url, "https://mini.example.test/mini/calculator");
+        assert_eq!(published.path, workspace.join("mini_apps/calculator/index.html"));
+        assert!(published.path.is_file());
+        assert!(fs::read_to_string(&published.path).unwrap().contains("<button>1</button>"));
     }
 
     #[test]
