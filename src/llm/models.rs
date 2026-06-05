@@ -9,8 +9,13 @@ const EMBEDDED_CONTEXT_LIMITS: &str =
 
 pub type ModelCatalog = BTreeMap<String, BTreeMap<String, Vec<ModelEntry>>>;
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct ModelEntry(pub String, pub String, pub String);
+/// Catalog entry for a single model. Deserialized from JSON arrays in
+/// `config/model_catalog.json`. Existing entries are 3-element arrays
+/// `[name, model_id, price]` (protocol defaults to `""`). New entries
+/// may include a 4th element `[name, model_id, price, protocol]` to
+/// declare which wire protocol the model uses ("openai" or "anthropic").
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ModelEntry(pub String, pub String, pub String, pub String);
 
 impl ModelEntry {
     pub fn name(&self) -> &str {
@@ -23,6 +28,46 @@ impl ModelEntry {
 
     pub fn price(&self) -> &str {
         &self.2
+    }
+
+    /// Wire protocol for this model: `"openai"`, `"anthropic"`, or `""`
+    /// (use provider default). Only meaningful for multi-protocol providers
+    /// like OpenCode Go; single-protocol providers always return `""`.
+    pub fn protocol(&self) -> &str {
+        &self.3
+    }
+}
+
+impl<'de> Deserialize<'de> for ModelEntry {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let arr: Vec<String> = Vec::deserialize(deserializer)?;
+        match arr.as_slice() {
+            [name, model_id, price] => Ok(ModelEntry(
+                name.clone(),
+                model_id.clone(),
+                price.clone(),
+                String::new(),
+            )),
+            [name, model_id, price, protocol] => Ok(ModelEntry(
+                name.clone(),
+                model_id.clone(),
+                price.clone(),
+                protocol.clone(),
+            )),
+            _ => Err(serde::de::Error::custom(
+                "expected 3 or 4 elements in ModelEntry array",
+            )),
+        }
+    }
+}
+
+impl Serialize for ModelEntry {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        if self.3.is_empty() {
+            (&[&self.0, &self.1, &self.2]).serialize(serializer)
+        } else {
+            (&[&self.0, &self.1, &self.2, &self.3]).serialize(serializer)
+        }
     }
 }
 
@@ -90,6 +135,8 @@ pub fn normalize_model_id(provider: &str, id: &str) -> String {
     let trimmed = id.trim();
     if provider == "openrouter" && !trimmed.is_empty() && !trimmed.starts_with("openrouter/") {
         format!("openrouter/{trimmed}")
+    } else if provider == "opencode-go" && !trimmed.is_empty() && !trimmed.starts_with("opencode-go/") {
+        format!("opencode-go/{trimmed}")
     } else {
         id.to_string()
     }
@@ -119,10 +166,30 @@ fn load_embedded_catalog() -> ModelCatalog {
     serde_json::from_value(serde_json::Value::Object(object)).unwrap_or_default()
 }
 
+/// Look up the wire protocol for a model id in the catalog. Returns `"openai"`,
+/// `"anthropic"`, or `""` (use provider default). Used by the router to select
+/// the correct genai adapter for multi-protocol providers like OpenCode Go.
+pub fn protocol_for_model(model_id: &str) -> &'static str {
+    let model_id = model_id.trim();
+    if model_id.is_empty() {
+        return "";
+    }
+    for (_provider, groups) in model_catalog() {
+        for entries in groups.values() {
+            if let Some(entry) = entries.iter().find(|entry| entry.model_id() == model_id) {
+                return entry.protocol();
+            }
+        }
+    }
+    ""
+}
+
 fn provider_for_model_fallback(model_id: &str) -> Option<&'static str> {
     let lower = model_id.to_ascii_lowercase();
     if lower.starts_with("openrouter/") {
         Some("openrouter")
+    } else if lower.starts_with("opencode-go/") {
+        Some("opencode-go")
     } else if lower.contains("claude") {
         Some("anthropic")
     } else if lower.contains("gpt") {
@@ -137,6 +204,7 @@ fn provider_auth_options() -> &'static [(&'static str, &'static [(&'static str, 
         ("openrouter", &[("OPENROUTER_API_KEY", "API")]),
         ("anthropic", &[("ANTHROPIC_API_KEY", "API")]),
         ("openai", &[("OPENAI_API_KEY", "API")]),
+        ("opencode-go", &[("OPENCODE_GO_API_KEY", "API")]),
     ]
 }
 
@@ -145,6 +213,7 @@ fn provider_label(provider: &str, auth: &str) -> String {
         "openrouter" => "OpenRouter",
         "anthropic" => "Anthropic",
         "openai" => "OpenAI",
+        "opencode-go" => "OpenCode Go",
         _ => provider,
     };
     if provider == "openrouter" {
@@ -220,5 +289,83 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn model_entry_deserialize_three_elements() {
+        let entry: ModelEntry = serde_json::from_str(r#"["Kimi K2.6", "openrouter/moonshotai/kimi-k2.6", "$0.60/$2.80"]"#).unwrap();
+        assert_eq!(entry.name(), "Kimi K2.6");
+        assert_eq!(entry.model_id(), "openrouter/moonshotai/kimi-k2.6");
+        assert_eq!(entry.price(), "$0.60/$2.80");
+        assert_eq!(entry.protocol(), "");
+    }
+
+    #[test]
+    fn model_entry_deserialize_four_elements() {
+        let entry: ModelEntry = serde_json::from_str(r#"["Kimi K2.6", "opencode-go/kimi-k2.6", "$0.60/$2.80", "openai"]"#).unwrap();
+        assert_eq!(entry.name(), "Kimi K2.6");
+        assert_eq!(entry.model_id(), "opencode-go/kimi-k2.6");
+        assert_eq!(entry.price(), "$0.60/$2.80");
+        assert_eq!(entry.protocol(), "openai");
+    }
+
+    #[test]
+    fn model_entry_serialize_three_when_empty_protocol() {
+        let entry = ModelEntry("Test".into(), "test-id".into(), "$1".into(), String::new());
+        let json = serde_json::to_string(&entry).unwrap();
+        assert_eq!(json, r#"["Test","test-id","$1"]"#);
+    }
+
+    #[test]
+    fn model_entry_serialize_four_when_protocol_set() {
+        let entry = ModelEntry("Test".into(), "test-id".into(), "$1".into(), "openai".into());
+        let json = serde_json::to_string(&entry).unwrap();
+        assert_eq!(json, r#"["Test","test-id","$1","openai"]"#);
+    }
+
+    #[test]
+    fn normalize_prefixes_bare_opencode_go_ids_once() {
+        assert_eq!(
+            normalize_model_id("opencode-go", "kimi-k2.6"),
+            "opencode-go/kimi-k2.6"
+        );
+        assert_eq!(
+            normalize_model_id("opencode-go", "opencode-go/kimi-k2.6"),
+            "opencode-go/kimi-k2.6"
+        );
+        assert_eq!(normalize_model_id("opencode-go", "  "), "  ");
+    }
+
+    #[test]
+    fn provider_lookup_finds_opencode_go_prefix() {
+        assert_eq!(provider_for_model("opencode-go/kimi-k2.6"), Some("opencode-go"));
+        assert_eq!(provider_for_model("kimi-k2.6"), None);
+    }
+
+    #[test]
+    fn protocol_for_model_returns_wire_protocol() {
+        let openai_model = ModelEntry(
+            "Kimi K2.6".into(),
+            "opencode-go/kimi-k2.6".into(),
+            "$0.60/$2.80".into(),
+            "openai".into(),
+        );
+        assert_eq!(openai_model.protocol(), "openai");
+
+        let anthropic_model = ModelEntry(
+            "Qwen3.7 Max".into(),
+            "opencode-go/qwen3.7-max".into(),
+            "$0.50/$2".into(),
+            "anthropic".into(),
+        );
+        assert_eq!(anthropic_model.protocol(), "anthropic");
+
+        let no_protocol = ModelEntry(
+            "Claude Opus 4.7".into(),
+            "claude-opus-4-7".into(),
+            "$5/$25".into(),
+            String::new(),
+        );
+        assert_eq!(no_protocol.protocol(), "");
     }
 }

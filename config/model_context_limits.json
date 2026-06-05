@@ -36,5 +36,20 @@
   "openrouter/z-ai/glm-5.1": 128000,
   "openrouter/qwen/qwen3.5-plus-02-15": 128000,
   "openrouter/qwen/qwen3.5-flash-02-23": 128000,
-  "openrouter/xiaomi/mimo-v2-flash": 128000
+  "openrouter/xiaomi/mimo-v2-flash": 128000,
+
+  "opencode-go/kimi-k2.6": 128000,
+  "opencode-go/kimi-k2.5": 128000,
+  "opencode-go/glm-5.1": 128000,
+  "opencode-go/glm-5": 128000,
+  "opencode-go/mimo-v2.5-pro": 128000,
+  "opencode-go/mimo-v2.5": 128000,
+  "opencode-go/deepseek-v4-pro": 128000,
+  "opencode-go/deepseek-v4-flash": 128000,
+  "opencode-go/qwen3.7-max": 128000,
+  "opencode-go/qwen3.7-plus": 128000,
+  "opencode-go/qwen3.6-plus": 128000,
+  "opencode-go/minimax-m3": 128000,
+  "opencode-go/minimax-m2.7": 128000,
+  "opencode-go/minimax-m2.5": 128000
 }

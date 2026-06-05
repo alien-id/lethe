@@ -41,7 +41,7 @@ enum Command {
     /// (Docker/CI): pass --provider/--model/--aux-model and supply the key via
     /// the provider's env var (e.g. OPENROUTER_API_KEY).
     Init {
-        /// Provider id: openrouter | anthropic | openai. Skips the prompt.
+        /// Provider id: openrouter | anthropic | openai | opencode-go. Skips the prompt.
         #[arg(long)]
         provider: Option<String>,
         /// Main model id. Skips the prompt (defaults to the catalog top pick).
@@ -282,6 +282,8 @@ pub enum LoginCommand {
     Anthropic,
     /// Sign in to OpenRouter (API key only — no subscription path).
     Openrouter,
+    /// Sign in to OpenCode Go (API key only — no subscription path).
+    OpencodeGo,
 }
 
 #[derive(Debug, Subcommand)]
@@ -896,6 +898,11 @@ async fn main() -> Result<()> {
                 "OPENROUTER_API_KEY",
                 "Paste OPENROUTER_API_KEY (https://openrouter.ai/keys): ",
             ),
+            LoginCommand::OpencodeGo => lethe::llm::oauth_env::run_api_key_login(
+                "opencode-go",
+                "OPENCODE_GO_API_KEY",
+                "Paste OPENCODE_GO_API_KEY (https://opencode.ai/zen/go): ",
+            ),
         },
         Command::Check => h::check().await,
         Command::Prompt { name } => h::print_prompt(&name),
@@ -1060,6 +1067,7 @@ fn status(settings: &Settings) -> Result<()> {
         ("ANTHROPIC_API_KEY", anthropic_key.as_str()),
         ("ANTHROPIC_AUTH_TOKEN", anthropic_token.as_str()),
         ("OPENAI_API_KEY", llm.openai_api_key.as_str()),
+        ("OPENCODE_GO_API_KEY", llm.opencode_go_api_key.as_str()),
     ] {
         lines.push(format!("    {label:<20} {}", secret_status(value)));
     }

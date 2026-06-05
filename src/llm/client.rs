@@ -35,6 +35,7 @@ use crate::config::Settings;
 const OPENROUTER_ENDPOINT: &str = "https://openrouter.ai/api/v1/";
 const OPENAI_ENDPOINT: &str = "https://api.openai.com/v1/";
 const ANTHROPIC_ENDPOINT: &str = "https://api.anthropic.com/v1/";
+const OPENCODE_GO_ENDPOINT: &str = "https://opencode.ai/zen/go/v1/";
 pub(crate) const ANTHROPIC_OAUTH_TOKEN_URL: &str = "https://console.anthropic.com/v1/oauth/token";
 const ANTHROPIC_MESSAGES_URL: &str = "https://api.anthropic.com/v1/messages";
 pub(crate) const ANTHROPIC_OAUTH_CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
@@ -902,6 +903,25 @@ fn router_target_for_model(raw_model: &str, config: &LlmRouterConfig) -> Option<
         });
     }
 
+    // OpenCode Go fast-path: single endpoint, per-model protocol from catalog.
+    // Must come before the generic slash_provider branch because
+    // adapter_for_provider returns None for "opencode-go" — the adapter
+    // depends on the individual model's protocol, not the provider.
+    if provider == "opencode-go" {
+        let model_name = strip_slash_provider(model, "opencode-go").to_string();
+        let protocol = crate::llm::models::protocol_for_model(model);
+        let adapter = match protocol {
+            "anthropic" => AdapterKind::Anthropic,
+            _ => AdapterKind::OpenAI,
+        };
+        return Some(RouterTarget {
+            endpoint: OPENCODE_GO_ENDPOINT.to_string(),
+            auth_env: "OPENCODE_GO_API_KEY".to_string(),
+            adapter,
+            model_name,
+        });
+    }
+
     if let Some(slash_provider) = slash_provider
         && let Some(endpoint) = default_endpoint_for_provider(slash_provider)
     {
@@ -943,6 +963,7 @@ fn slash_provider(model: &str) -> Option<&str> {
         "openai" => Some("openai"),
         "anthropic" => Some("anthropic"),
         "ollama" => Some("ollama"),
+        "opencode-go" => Some("opencode-go"),
         _ => None,
     }
 }
@@ -963,6 +984,9 @@ fn adapter_for_provider(provider: &str) -> Option<AdapterKind> {
         "openrouter" | "openai" => Some(AdapterKind::OpenAI),
         "anthropic" => Some(AdapterKind::Anthropic),
         "ollama" => Some(AdapterKind::Ollama),
+        // "opencode-go" is NOT here — its adapter depends on the
+        // per-model protocol field, resolved in the opencode-go fast-path
+        // branch of router_target_for_model(), not here.
         _ => None,
     }
 }
@@ -972,6 +996,7 @@ fn default_endpoint_for_provider(provider: &str) -> Option<&'static str> {
         "openai" => Some(OPENAI_ENDPOINT),
         "anthropic" => Some(ANTHROPIC_ENDPOINT),
         "openrouter" => Some(OPENROUTER_ENDPOINT),
+        "opencode-go" => Some(OPENCODE_GO_ENDPOINT),
         _ => None,
     }
 }
@@ -980,6 +1005,7 @@ fn auth_env_for_provider(provider: &str) -> &'static str {
     match provider {
         "openrouter" => "OPENROUTER_API_KEY",
         "anthropic" => "ANTHROPIC_API_KEY",
+        "opencode-go" => "OPENCODE_GO_API_KEY",
         _ => "OPENAI_API_KEY",
     }
 }
@@ -1064,7 +1090,13 @@ fn should_use_anthropic_oauth(model: &str, config: &LlmRouterConfig) -> bool {
     if slash_provider(model) == Some("openrouter") {
         return false;
     }
+    if slash_provider(model) == Some("opencode-go") {
+        return false;
+    }
     if normalized_provider(&config.provider).as_deref() == Some("openrouter") {
+        return false;
+    }
+    if normalized_provider(&config.provider).as_deref() == Some("opencode-go") {
         return false;
     }
     let model = strip_slash_provider(model, "anthropic").to_ascii_lowercase();
@@ -1080,7 +1112,13 @@ fn should_use_openai_oauth(model: &str, config: &LlmRouterConfig) -> bool {
     if slash_provider(model) == Some("openrouter") {
         return false;
     }
+    if slash_provider(model) == Some("opencode-go") {
+        return false;
+    }
     if normalized_provider(&config.provider).as_deref() == Some("openrouter") {
+        return false;
+    }
+    if normalized_provider(&config.provider).as_deref() == Some("opencode-go") {
         return false;
     }
     // Routes to OAuth when the user has explicitly selected the openai
@@ -1126,6 +1164,7 @@ fn auth_mode_for_model(model: &str, config: &LlmRouterConfig) -> String {
         "anthropic" => "anthropic_api_key".to_string(),
         "openrouter" => "openrouter_api_key".to_string(),
         "openai" => "openai_api_key".to_string(),
+        "opencode-go" => "opencode_go_api_key".to_string(),
         other if !other.is_empty() => format!("{other}_auth"),
         _ => "auto".to_string(),
     }
