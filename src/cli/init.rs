@@ -103,7 +103,7 @@ async fn run_interactive(args: InitArgs) -> Result<()> {
     // -- Provider -----------------------------------------------------------
     let provider = match args.provider.as_deref() {
         Some(p) => Provider::from_id(p)
-            .ok_or_else(|| anyhow!("unknown --provider `{p}` (use openrouter|anthropic|openai)"))?,
+            .ok_or_else(|| anyhow!("unknown --provider `{p}` (use openrouter|anthropic|openai|opencode-go)"))?,
         None => prompt_provider(&detected)?,
     };
     info(&format!("Using {}", provider.label()));
@@ -205,11 +205,11 @@ async fn run_noninteractive(args: InitArgs) -> Result<()> {
     let Some(provider_id) = provider_id else {
         bail!(
             "`lethe init` has no terminal here (non-interactive). \
-             Pass --provider <openrouter|anthropic|openai> or set LLM_PROVIDER."
+             Pass --provider <openrouter|anthropic|openai|opencode-go> or set LLM_PROVIDER."
         );
     };
     let provider = Provider::from_id(&provider_id).ok_or_else(|| {
-        anyhow!("unknown provider `{provider_id}` (use openrouter|anthropic|openai)")
+        anyhow!("unknown provider `{provider_id}` (use openrouter|anthropic|openai|opencode-go)")
     })?;
 
     // Key: from the provider's env var, or (subscription) existing OAuth tokens.
@@ -274,6 +274,7 @@ enum Provider {
     OpenRouter,
     Anthropic,
     OpenAI,
+    OpenCodeGo,
 }
 
 impl Provider {
@@ -282,6 +283,7 @@ impl Provider {
             Provider::OpenRouter => "OpenRouter",
             Provider::Anthropic => "Anthropic",
             Provider::OpenAI => "OpenAI",
+            Provider::OpenCodeGo => "OpenCode Go",
         }
     }
     fn id(self) -> &'static str {
@@ -289,6 +291,7 @@ impl Provider {
             Provider::OpenRouter => "openrouter",
             Provider::Anthropic => "anthropic",
             Provider::OpenAI => "openai",
+            Provider::OpenCodeGo => "opencode-go",
         }
     }
     fn from_id(raw: &str) -> Option<Self> {
@@ -296,6 +299,7 @@ impl Provider {
             "openrouter" => Some(Provider::OpenRouter),
             "anthropic" => Some(Provider::Anthropic),
             "openai" => Some(Provider::OpenAI),
+            "opencode-go" | "opencodego" | "opencode_go" => Some(Provider::OpenCodeGo),
             _ => None,
         }
     }
@@ -304,6 +308,7 @@ impl Provider {
             Provider::OpenRouter => "OPENROUTER_API_KEY",
             Provider::Anthropic => "ANTHROPIC_API_KEY",
             Provider::OpenAI => "OPENAI_API_KEY",
+            Provider::OpenCodeGo => "OPENCODE_GO_API_KEY",
         }
     }
     fn key_url(self) -> &'static str {
@@ -311,6 +316,7 @@ impl Provider {
             Provider::OpenRouter => "https://openrouter.ai/keys",
             Provider::Anthropic => "https://console.anthropic.com/settings/keys",
             Provider::OpenAI => "https://platform.openai.com/api-keys",
+            Provider::OpenCodeGo => "https://opencode.ai/zen/go",
         }
     }
     /// Subscription label for the OAuth path, if the provider has one.
@@ -319,13 +325,14 @@ impl Provider {
             Provider::Anthropic => Some("Claude Pro/Max"),
             Provider::OpenAI => Some("ChatGPT Plus/Pro"),
             Provider::OpenRouter => None,
+            Provider::OpenCodeGo => None,
         }
     }
 }
 
 fn detect_keys(existing_env: &EnvMap) -> Vec<&'static str> {
     let mut out = Vec::new();
-    for provider in [Provider::OpenRouter, Provider::Anthropic, Provider::OpenAI] {
+    for provider in [Provider::OpenRouter, Provider::Anthropic, Provider::OpenAI, Provider::OpenCodeGo] {
         let key = provider.key_env();
         let present = std::env::var(key)
             .ok()
@@ -357,6 +364,10 @@ fn prompt_provider(detected: &[&'static str]) -> Result<Provider> {
             Provider::OpenAI,
             "OpenAI (API key or ChatGPT Plus/Pro subscription)",
         ),
+        (
+            Provider::OpenCodeGo,
+            "OpenCode Go (budget-friendly open models, $5–$10/month)",
+        ),
     ];
     for (idx, (provider, desc)) in entries.iter().enumerate() {
         let badge = if detected.contains(&provider.key_env()) {
@@ -374,7 +385,7 @@ fn prompt_provider(detected: &[&'static str]) -> Result<Provider> {
         .map(|i| i + 1)
         .unwrap_or(1);
 
-    let choice = prompt_line(&format!("\nChoose [1-3, default={default}]: "))?;
+    let choice = prompt_line(&format!("\nChoose [1-4, default={default}]: "))?;
     let choice = choice.trim();
     let n = if choice.is_empty() {
         default
@@ -495,7 +506,7 @@ async fn prompt_api_key(provider: Provider, existing_env: &EnvMap) -> Result<Opt
             match provider {
                 Provider::OpenAI => lethe::llm::openai_oauth::run_device_login().await?,
                 Provider::Anthropic => lethe::llm::anthropic_oauth::run_device_login().await?,
-                Provider::OpenRouter => unreachable!("openrouter has no subscription path"),
+                Provider::OpenCodeGo | Provider::OpenRouter => unreachable!("no subscription path"),
             }
             return Ok(None);
         }
@@ -794,6 +805,8 @@ mod tests {
         assert_eq!(Provider::from_id("openrouter"), Some(Provider::OpenRouter));
         assert_eq!(Provider::from_id("ANTHROPIC"), Some(Provider::Anthropic));
         assert_eq!(Provider::from_id(" openai "), Some(Provider::OpenAI));
+        assert_eq!(Provider::from_id("opencode-go"), Some(Provider::OpenCodeGo));
+        assert_eq!(Provider::from_id("opencodego"), Some(Provider::OpenCodeGo));
         assert_eq!(Provider::from_id("nope"), None);
     }
 }

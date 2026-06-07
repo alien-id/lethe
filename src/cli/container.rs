@@ -13,7 +13,7 @@
 //! software); `--dry-run` prints the exact engine commands without running
 //! them; engine install is always confirmed first.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result, bail};
@@ -838,15 +838,22 @@ fn build_context_dir() -> PathBuf {
     std::env::temp_dir().join("lethe-container-build")
 }
 
-/// The Lethe repo root, if the running binary lives in a checkout's `target/`.
+fn is_repo_root(dir: &Path) -> bool {
+    dir.join(".git").exists() && dir.join("Containerfile").exists()
+}
+
+/// The Lethe repo root, if the current directory or running binary lives in a checkout.
 fn repo_root() -> Option<PathBuf> {
+    if let Ok(cwd) = std::env::current_dir() {
+        if is_repo_root(&cwd) {
+            return Some(cwd);
+        }
+    }
+
     let exe = std::env::current_exe().ok()?;
     // target/<profile>/lethe → repo root is two levels up; verify Containerfile.
     let candidate = exe.parent()?.parent()?.parent()?;
-    candidate
-        .join("Containerfile")
-        .exists()
-        .then(|| candidate.to_path_buf())
+    is_repo_root(candidate).then(|| candidate.to_path_buf())
 }
 
 /// Prompt for extra directories to share into the container. Used by `init`.
@@ -948,6 +955,31 @@ mod tests {
         assert_eq!(linux_target("aarch64"), "aarch64-unknown-linux-gnu");
         assert_eq!(linux_target("x86_64"), "x86_64-unknown-linux-gnu");
         assert_eq!(linux_target("anything"), "x86_64-unknown-linux-gnu");
+    }
+
+    #[test]
+    fn is_repo_root_requires_git_marker_and_containerfile() {
+        let unique = format!(
+            "lethe-repo-root-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let dir = std::env::temp_dir().join(unique);
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        assert!(!is_repo_root(&dir));
+
+        std::fs::write(dir.join(".git"), "").unwrap();
+        assert!(!is_repo_root(&dir));
+
+        std::fs::write(dir.join("Containerfile"), "FROM scratch\n").unwrap();
+        assert!(is_repo_root(&dir));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

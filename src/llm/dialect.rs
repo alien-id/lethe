@@ -7,7 +7,7 @@
 //! [`dialect_for_model`].
 
 use crate::llm::CacheHint;
-use crate::llm::models::provider_for_model;
+use crate::llm::models::{provider_for_model, protocol_for_model};
 
 /// Behaviour knobs the system-prompt assembler queries per turn. Currently
 /// the only differentiator we need across families is whether to attach
@@ -63,6 +63,12 @@ impl PromptDialect for DefaultDialect {
 pub fn dialect_for_model(model_id: &str) -> Box<dyn PromptDialect> {
     match provider_for_model(model_id) {
         Some("anthropic") => Box::new(ClaudeDialect),
+        // OpenCode Go models using the Anthropic wire protocol get Claude
+        // cache markers; OpenAI-protocol models use the default dialect.
+        Some("opencode-go") => match protocol_for_model(model_id) {
+            "anthropic" => Box::new(ClaudeDialect),
+            _ => Box::new(DefaultDialect),
+        },
         // OpenRouter is a relay — the underlying model could be Claude, but
         // OpenRouter strips the cache_control hint anyway. Treat as default.
         _ => Box::new(DefaultDialect),
@@ -90,5 +96,23 @@ mod tests {
     fn openrouter_falls_back_to_default() {
         let dialect = dialect_for_model("openrouter/anthropic/claude-opus-4");
         assert!(dialect.cache_marker_for_stable().is_none());
+    }
+
+    #[test]
+    fn opencode_go_anthropic_protocol_gets_claude_dialect() {
+        let dialect = dialect_for_model("opencode-go/qwen3.7-max");
+        assert!(
+            dialect.cache_marker_for_stable().is_some(),
+            "opencode-go Anthropic-protocol model should get ClaudeDialect with cache markers"
+        );
+    }
+
+    #[test]
+    fn opencode_go_openai_protocol_uses_default_dialect() {
+        let dialect = dialect_for_model("opencode-go/kimi-k2.6");
+        assert!(
+            dialect.cache_marker_for_stable().is_none(),
+            "opencode-go OpenAI-protocol model should use DefaultDialect (no cache markers)"
+        );
     }
 }

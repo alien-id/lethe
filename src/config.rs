@@ -44,6 +44,7 @@ pub struct Paths {
 pub struct LlmConfig {
     pub openrouter_api_key: String,
     pub openai_api_key: String,
+    pub opencode_go_api_key: String,
     pub llm_model: String,
     pub llm_model_aux: String,
     pub llm_provider: String,
@@ -73,6 +74,7 @@ impl LlmConfig {
         }
         let has_auth = !self.openrouter_api_key.trim().is_empty()
             || !self.openai_api_key.trim().is_empty()
+            || !self.opencode_go_api_key.trim().is_empty()
             || std::env::var("ANTHROPIC_API_KEY")
                 .ok()
                 .is_some_and(|value| !value.trim().is_empty())
@@ -85,7 +87,8 @@ impl LlmConfig {
             return Err(format!(
                 "No LLM auth key configured for model `{}`. Run `lethe init`,\n\
                  or set one of: OPENROUTER_API_KEY, ANTHROPIC_API_KEY,\n\
-                 OPENAI_API_KEY (or sign in to a subscription with `lethe login`).",
+                 OPENAI_API_KEY, OPENCODE_GO_API_KEY\n\
+                 (or sign in to a subscription with `lethe login`).",
                 self.llm_model
             ));
         }
@@ -216,6 +219,7 @@ impl Settings {
             llm: LlmConfig {
                 openrouter_api_key: env_string("OPENROUTER_API_KEY", ""),
                 openai_api_key: env_string("OPENAI_API_KEY", ""),
+                opencode_go_api_key: env_string("OPENCODE_GO_API_KEY", ""),
                 llm_model: env_string("LLM_MODEL", ""),
                 llm_model_aux: env_string("LLM_MODEL_AUX", ""),
                 llm_provider: env_string("LLM_PROVIDER", ""),
@@ -338,6 +342,7 @@ pub fn test_settings(root: &std::path::Path) -> Settings {
         llm: LlmConfig {
             openrouter_api_key: String::new(),
             openai_api_key: String::new(),
+            opencode_go_api_key: String::new(),
             llm_model: "test-model".to_string(),
             llm_model_aux: String::new(),
             llm_provider: String::new(),

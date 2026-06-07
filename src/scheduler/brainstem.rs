@@ -99,7 +99,7 @@ pub async fn run(
         if let Err(error) =
             tick(&agent, &settings, &options, &mut heartbeat, &mut limiter, &handle).await
         {
-            tracing::warn!(error = %error, "brainstem heartbeat tick failed");
+            tracing::warn!(error = ?error, "brainstem heartbeat tick failed");
         }
     }
 }

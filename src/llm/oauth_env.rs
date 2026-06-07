@@ -299,6 +299,7 @@ pub fn prompt_provider_models(provider: &str) -> Result<(Option<String>, Option<
 }
 
 const OPENROUTER_PREFIX: &str = "openrouter/";
+const OPENCODE_GO_PREFIX: &str = "opencode-go/";
 
 fn prompt_one_model(provider: &str, label: &str, default: &str) -> Result<String> {
     if provider == "openrouter" {
@@ -307,6 +308,12 @@ fn prompt_one_model(provider: &str, label: &str, default: &str) -> Result<String
             .unwrap_or(default);
         let raw = prompt_model_id(label, display_default)?;
         Ok(prefix_openrouter(&raw))
+    } else if provider == "opencode-go" {
+        let display_default = default
+            .strip_prefix(OPENCODE_GO_PREFIX)
+            .unwrap_or(default);
+        let raw = prompt_model_id(label, display_default)?;
+        Ok(prefix_opencode_go(&raw))
     } else {
         prompt_model_id(label, default)
     }
@@ -318,6 +325,15 @@ fn prefix_openrouter(value: &str) -> String {
         trimmed.to_string()
     } else {
         format!("{OPENROUTER_PREFIX}{trimmed}")
+    }
+}
+
+fn prefix_opencode_go(value: &str) -> String {
+    let trimmed = value.trim();
+    if trimmed.starts_with(OPENCODE_GO_PREFIX) {
+        trimmed.to_string()
+    } else {
+        format!("{OPENCODE_GO_PREFIX}{trimmed}")
     }
 }
 

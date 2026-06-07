@@ -349,7 +349,7 @@ impl ConversationManager {
                 };
 
                 if let Err(error) = callback(context.clone()).await {
-                    tracing::warn!(chat_id, error = %error, "conversation processing callback failed");
+                    tracing::warn!(chat_id, error = ?error, "conversation processing callback failed");
                 }
 
                 let mut state = state.lock().await;

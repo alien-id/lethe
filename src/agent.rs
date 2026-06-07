@@ -1025,6 +1025,7 @@ impl CompactionBudget {
 /// the rolling `conversation_summary` block (Pass 3, async, in chat_once).
 fn compact_history(messages: &mut Vec<LlmMessage>, budget: CompactionBudget) -> Vec<LlmMessage> {
     archive_old_tool_results(messages, budget.max_tool_result_inline_chars());
+    archive_old_images(messages);
     if total_chars(messages) <= budget.trigger_chars() {
         return Vec::new();
     }
@@ -1033,6 +1034,11 @@ fn compact_history(messages: &mut Vec<LlmMessage>, budget: CompactionBudget) -> 
 
 fn message_chars(message: &LlmMessage) -> usize {
     message.content.chars().count()
+        + message
+            .attachments
+            .iter()
+            .map(|att| att.base64_content.chars().count())
+            .sum::<usize>()
         + message
             .tool_responses
             .iter()
@@ -1046,6 +1052,95 @@ fn total_chars(messages: &[LlmMessage]) -> usize {
 
 /// Per Python's logic: walk newest-first, accumulating `effective` weighted
 /// chars, find the index at which we'd exceed `target_chars`. User messages
+/// Replace base64-encoded image payloads in old user messages with
+/// lightweight `[\u200bimage: N chars archived]` placeholders, freeing
+/// the compaction budget from multi-megabyte inline images that would
+/// otherwise blow past the model's context window. Operates in-place
+/// on `LlmMessage.content` since image data is stored as JSON text
+/// (OpenAI-style content parts with `image_url`/`data:` URLs).
+///
+/// Recent images (last 2 user turns) are preserved so the model can
+/// still see what was just sent. Older images get replaced with a stub
+/// that preserves the message structure but drops the binary payload.
+fn archive_old_images(messages: &mut [LlmMessage]) {
+    // Find the index cutoff: keep images in the last 2 user messages.
+    let recent_user_cutoff = {
+        let mut user_count = 0usize;
+        let mut cutoff = messages.len(); // default: archive everything
+        for (idx, msg) in messages.iter().enumerate().rev() {
+            if msg.role == LlmRole::User {
+                user_count += 1;
+                if user_count >= 2 {
+                    cutoff = idx;
+                    break;
+                }
+            }
+        }
+        cutoff
+    };
+
+    for (idx, message) in messages.iter_mut().enumerate() {
+        if idx >= recent_user_cutoff {
+            continue;
+        }
+        if !message.content.contains("data:image") && !message.content.contains("base64,") {
+            continue;
+        }
+        message.content = replace_base64_images_with_stubs(&message.content);
+    }
+}
+
+/// Parse a message's content (which may be a JSON array of content parts)
+/// and replace `image_url` parts containing `data:` base64 URLs with
+/// lightweight placeholders. If parsing fails, fall back to a regex-based
+/// strip that preserves surrounding text.
+fn replace_base64_images_with_stubs(content: &str) -> String {
+    // Try parsing as JSON array of content parts (OpenAI multi-modal format).
+    if let Ok(parts) = serde_json::from_str::<Vec<serde_json::Value>>(content) {
+        let mut changed = false;
+        let mut result = Vec::with_capacity(parts.len());
+        for part in &parts {
+            if let Some(obj) = part.as_object() {
+                if obj.get("type").and_then(|v| v.as_str()) == Some("image_url") {
+                    if let Some(url) = obj
+                            .get("image_url")
+                            .and_then(|iu| iu.get("url"))
+                            .and_then(|v| v.as_str())
+                        && url.starts_with("data:image")
+                    {
+                        let media_type = url
+                            .strip_prefix("data:")
+                            .and_then(|s| s.split(';').next())
+                            .unwrap_or("image");
+                        let char_count = url.chars().count();
+                        let stub = format!("[image: {media_type}, {char_count} chars archived]");
+                        result.push(serde_json::json!({
+                            "type": "text",
+                            "text": stub
+                        }));
+                        changed = true;
+                        continue;
+                    }
+                }
+            }
+            result.push(part.clone());
+        }
+        if changed {
+            return serde_json::to_string(&result).unwrap_or_else(|_| content.to_string());
+        }
+    }
+
+    // Fallback: regex-strip any `data:image/...;base64,...` blobs.
+    // This handles cases where content is not a clean JSON array.
+    let re = regex::Regex::new(r"data:image/[^;]+;base64,[A-Za-z0-9+/=]+").unwrap_or_else(|_| unreachable!());
+    let stripped = re.replace_all(content, "[image archived]");
+    if stripped != content {
+        return stripped.into_owned();
+    }
+
+    content.to_string()
+}
+
 /// count at 1/[`USER_MESSAGE_WEIGHT_DIVISOR`] of their raw size so they're
 /// retained more aggressively.
 fn weighted_keep_cutoff(messages: &[LlmMessage], target_chars: usize) -> usize {
@@ -1777,5 +1872,97 @@ mod tests {
         assert!(later.contains("Continue your actor task"));
         assert!(later.contains("send_message"));
         assert!(later.contains("turn 2/3"));
+    }
+
+    #[test]
+    fn archive_old_images_strips_old_image_payloads() {
+        let image_content = format!(
+            r#"[{{\"type\":\"text\",\"text\":\"check this out\"}},{{\"type\":\"image_url\",\"image_url\":{{\"url\":\"data:image/jpeg;base64,{base64}\"}}}}]"#,
+            base64 = "A".repeat(100_000)
+        );
+        let recent_content = format!(
+            r#"[{{\"type\":\"text\",\"text\":\"new photo\"}},{{\"type\":\"image_url\",\"image_url\":{{\"url\":\"data:image/png;base64,{base64}\"}}}}]"#,
+            base64 = "B".repeat(100_000)
+        );
+        let mut messages = vec![
+            LlmMessage {
+                role: LlmRole::System,
+                content: "You are helpful.".to_string(),
+                attachments: vec![],
+                tool_calls: vec![],
+                tool_responses: vec![],
+                cache_control: None,
+            },
+            LlmMessage {
+                role: LlmRole::User,
+                content: image_content.clone(),
+                attachments: vec![],
+                tool_calls: vec![],
+                tool_responses: vec![],
+                cache_control: None,
+            },
+            LlmMessage {
+                role: LlmRole::Assistant,
+                content: "I see it!".to_string(),
+                attachments: vec![],
+                tool_calls: vec![],
+                tool_responses: vec![],
+                cache_control: None,
+            },
+            LlmMessage {
+                role: LlmRole::User,
+                content: "thanks".to_string(),
+                attachments: vec![],
+                tool_calls: vec![],
+                tool_responses: vec![],
+                cache_control: None,
+            },
+            LlmMessage {
+                role: LlmRole::User,
+                content: recent_content.clone(),
+                attachments: vec![],
+                tool_calls: vec![],
+                tool_responses: vec![],
+                cache_control: None,
+            },
+        ];
+
+        let before_chars: usize = messages.iter().map(|m| m.content.chars().count()).sum();
+        assert!(before_chars > 200_000, "should have large base64 payloads");
+
+        archive_old_images(&mut messages);
+
+        let after_chars: usize = messages.iter().map(|m| m.content.chars().count()).sum();
+        // First user message should have its image stripped
+        assert!(
+            !messages[1].content.contains("base64,"),
+            "old image should be archived: {}",
+            &messages[1].content[..100.min(messages[1].content.len())]
+        );
+        // Recent user message should keep its image
+        assert!(
+            messages[4].content.contains("base64,"),
+            "recent image should be preserved: {}",
+            &messages[4].content[..100.min(messages[4].content.len())]
+        );
+        // Total chars should drop significantly (at least the old image)
+        assert!(
+            after_chars < before_chars,
+            "archived images should reduce char count: {after_chars} vs {before_chars}"
+        );
+        // The old image should be gone
+        assert!(messages[1].content.chars().count() < 1000, "old image msg should be small after archival");
+    }
+
+    #[test]
+    fn replace_base64_images_handles_non_json_content() {
+        let content = "Look at this! data:image/png;base64,iVBORw0KG... and that's it.";
+        let result = replace_base64_images_with_stubs(content);
+        assert!(!result.contains("base64,"));
+        assert!(result.contains("[image archived]"));
+
+        // Plain text without images should be unchanged
+        let plain = "Hello, no images here.";
+        assert_eq!(replace_base64_images_with_stubs(plain), plain);
     }
 }

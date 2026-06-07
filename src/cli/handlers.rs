@@ -203,27 +203,48 @@ pub(crate) async fn check() -> Result<()> {
         }
     }
 
-    // -- LLM ping (cheap aux-model round-trip) ------------------------------
+    // -- LLM ping (main model round-trip) -----------------------------------
     let router = LlmRouter::new(LlmRouterConfig::from_settings(&settings));
     let probe = vec![
         LlmMessage::system("Reply with the single word: ok"),
         LlmMessage::user("ready?"),
     ];
-    match router.complete(probe, true).await {
+    match router.complete(probe.clone(), false).await {
         Ok(reply) => {
             let preview = reply.trim().lines().next().unwrap_or("").to_string();
             println!(
-                "  [OK]   llm — `{}` ({} via aux model)",
+                "  [OK]   llm (main) — `{}` ({})",
                 preview,
-                settings.effective_aux_model()
+                settings.llm.llm_model
             );
         }
         Err(error) => {
-            println!("  [FAIL] llm: {error}");
+            println!("  [FAIL] llm (main): {error}");
             println!(
                 "         (check that the key is valid and the model id `{}` exists)",
-                settings.effective_aux_model()
+                settings.llm.llm_model
             );
+        }
+    }
+
+    // -- LLM ping (aux model round-trip, only if distinct from main) ----------
+    if settings.effective_aux_model() != settings.llm.llm_model {
+        match router.complete(probe, true).await {
+            Ok(reply) => {
+                let preview = reply.trim().lines().next().unwrap_or("").to_string();
+                println!(
+                    "  [OK]   llm (aux)  — `{}` ({})",
+                    preview,
+                    settings.effective_aux_model()
+                );
+            }
+            Err(error) => {
+                println!("  [FAIL] llm (aux): {error}");
+                println!(
+                    "         (check that the key is valid and the model id `{}` exists)",
+                    settings.effective_aux_model()
+                );
+            }
         }
     }
 
