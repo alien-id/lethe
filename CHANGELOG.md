@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.22.5 - OpenCode Go provider
 
 - **OpenCode Go provider with dual-protocol routing** (#27, thanks @voldmar): a
   new budget-friendly provider gateway alongside OpenRouter/Anthropic/OpenAI.
