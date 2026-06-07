@@ -49,3 +49,7 @@ data-split/
 outputs/
 unsloth_compiled_cache/
 workspace-split/
+
+# Agent instruction files (kept local, never committed)
+AGENTS.md
+CLAUDE.md
