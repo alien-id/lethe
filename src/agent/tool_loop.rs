@@ -338,35 +338,21 @@ pub(super) async fn complete_turn_with_tools_config_shared(
         }
 
         empty_count = 0;
-        // First tool call this turn: decide routing. When a dedicated tool model
-        // is configured, the base (cheap) model's job is only to DETECT that
-        // tools are needed — it's a weaker tool-caller and may emit malformed or
-        // runaway tool-call batches (e.g. empty arguments, duplicate ids). So we
-        // use its tool-call emission purely as a signal: discard these calls
-        // without executing or recording them, and let the tool model issue the
-        // real calls on the next iteration (which now routes to it). With no tool
-        // model configured this is a no-op and the base model's calls run as before.
+        // We have tool calls: execute the base model's call, and from the next
+        // model call onward run the rest of this chain on the dedicated tool
+        // model (if configured). Log the handoff once, the first time we cross
+        // into a tool chain this turn.
         if !entered_tool_chain {
             entered_tool_chain = true;
-            let has_tool_model = {
-                let router = context
-                    .router
-                    .read()
-                    .map_err(|error| AgentError::Llm(anyhow!("router lock poisoned: {error}")))?;
-                let has = router.config().has_tool_model();
-                if has {
-                    tracing::info!(
-                        tool_model = %router.config().tool_model(),
-                        discarded_calls = tool_calls.len(),
-                        "tool call detected — handing the chain to the tool model (discarding the base model's tool call)"
-                    );
-                }
-                has
-            };
-            if has_tool_model {
-                // Re-issue the same request on the tool model; do not append the
-                // base model's assistant/tool messages.
-                continue;
+            let router = context
+                .router
+                .read()
+                .map_err(|error| AgentError::Llm(anyhow!("router lock poisoned: {error}")))?;
+            if router.config().has_tool_model() {
+                tracing::info!(
+                    tool_model = %router.config().tool_model(),
+                    "tool call detected — switching to the tool model for the rest of the chain"
+                );
             }
         }
         let billable = tool_calls
