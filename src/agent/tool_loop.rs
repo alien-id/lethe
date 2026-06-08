@@ -244,6 +244,13 @@ pub(super) async fn complete_turn_with_tools_config_shared(
     let mut empty_count: usize = 0;
     let mut tool_log: Vec<ToolLogEntry> = Vec::new();
     let mut circuit_breaker_reason: Option<String> = None;
+    // Dynamic tool-model routing: the turn starts on the base model selected by
+    // `use_aux`. If a dedicated tool model (`LLM_MODEL_TOOL`) is configured, the
+    // first time the model asks for a tool we switch to it for the rest of the
+    // chain — including the post-chain reply — and the next turn starts on the
+    // base model again. With no tool model configured this stays false and the
+    // whole turn runs on the base model, exactly as before.
+    let mut entered_tool_chain = false;
 
     for iteration in 0..MAX_TOOL_ITERATIONS {
         request.tools = Some(registry.tools_for_active(&active_tools));
@@ -259,15 +266,26 @@ pub(super) async fn complete_turn_with_tools_config_shared(
             .read()
             .map_err(|error| AgentError::Llm(anyhow!("router lock poisoned: {error}")))?
             .clone();
+        // Once we're inside a tool chain and a dedicated tool model is
+        // configured, route to it; otherwise use the base model for this turn.
+        let model_id = if entered_tool_chain && router.config().has_tool_model() {
+            router.config().tool_model().to_string()
+        } else {
+            router.config().model_for(use_aux).to_string()
+        };
         let observer_for_stream = registry.turn_observer().cloned();
         let response = match observer_for_stream {
             Some(observer) => {
                 let on_delta = move |chunk: &str| observer.on_assistant_delta(chunk);
                 router
-                    .exec_chat_request_stream(request.clone(), use_aux, &on_delta)
+                    .exec_chat_request_stream_with_model(request.clone(), &model_id, &on_delta)
                     .await?
             }
-            None => router.exec_chat_request(request.clone(), use_aux).await?,
+            None => {
+                router
+                    .exec_chat_request_with_model(request.clone(), &model_id)
+                    .await?
+            }
         };
         if let Some(prompt_tokens) = response.usage.prompt_tokens {
             context
@@ -320,6 +338,22 @@ pub(super) async fn complete_turn_with_tools_config_shared(
         }
 
         empty_count = 0;
+        // We have tool calls: from the next model call onward, run the rest of
+        // this chain on the dedicated tool model (if configured). Log the
+        // handoff once, the first time we cross into a tool chain this turn.
+        if !entered_tool_chain {
+            entered_tool_chain = true;
+            let router = context
+                .router
+                .read()
+                .map_err(|error| AgentError::Llm(anyhow!("router lock poisoned: {error}")))?;
+            if router.config().has_tool_model() {
+                tracing::info!(
+                    tool_model = %router.config().tool_model(),
+                    "tool call detected — switching to the tool model for the rest of the chain"
+                );
+            }
+        }
         let billable = tool_calls
             .iter()
             .filter(|call| !is_free_tool(&call.fn_name))
@@ -502,7 +536,16 @@ pub(super) async fn complete_turn_with_tools_config_shared(
         .read()
         .map_err(|error| AgentError::Llm(anyhow!("router lock poisoned: {error}")))?
         .clone();
-    let response = router.exec_chat_request(request, use_aux).await?;
+    // This wrap-up reply follows a tool chain, so keep it on the tool model when
+    // one is configured (the strong model writes the final answer).
+    let wrap_model = if entered_tool_chain && router.config().has_tool_model() {
+        router.config().tool_model().to_string()
+    } else {
+        router.config().model_for(use_aux).to_string()
+    };
+    let response = router
+        .exec_chat_request_with_model(request, &wrap_model)
+        .await?;
     if let Some(prompt_tokens) = response.usage.prompt_tokens {
         context
             .last_prompt_tokens

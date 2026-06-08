@@ -47,6 +47,12 @@ pub struct LlmConfig {
     pub opencode_go_api_key: String,
     pub llm_model: String,
     pub llm_model_aux: String,
+    /// Optional dedicated model for tool-using reasoning. When set, a turn
+    /// starts on the primary model and transparently switches to this model
+    /// for the rest of a tool chain (including the post-chain reply); the next
+    /// turn starts on the primary model again. Empty = no switching (the whole
+    /// turn stays on the primary/aux model, as before).
+    pub llm_model_tool: String,
     pub llm_provider: String,
     pub llm_api_base: String,
     pub llm_context_limit: usize,
@@ -101,6 +107,12 @@ impl LlmConfig {
         } else {
             &self.llm_model_aux
         }
+    }
+
+    /// The dedicated tool/reasoning model id, trimmed, or empty when none is
+    /// configured (in which case the agent loop never switches models mid-turn).
+    pub fn effective_tool_model(&self) -> &str {
+        self.llm_model_tool.trim()
     }
 
     /// Effective context window in tokens for the given model id, falling
@@ -222,6 +234,7 @@ impl Settings {
                 opencode_go_api_key: env_string("OPENCODE_GO_API_KEY", ""),
                 llm_model: env_string("LLM_MODEL", ""),
                 llm_model_aux: env_string("LLM_MODEL_AUX", ""),
+                llm_model_tool: env_string("LLM_MODEL_TOOL", ""),
                 llm_provider: env_string("LLM_PROVIDER", ""),
                 llm_api_base: env_string("LLM_API_BASE", ""),
                 llm_context_limit: env_usize("LLM_CONTEXT_LIMIT", 100_000),
@@ -249,6 +262,10 @@ impl Settings {
 
     pub fn effective_aux_model(&self) -> &str {
         self.llm.effective_aux_model()
+    }
+
+    pub fn effective_tool_model(&self) -> &str {
+        self.llm.effective_tool_model()
     }
 }
 
@@ -345,6 +362,7 @@ pub fn test_settings(root: &std::path::Path) -> Settings {
             opencode_go_api_key: String::new(),
             llm_model: "test-model".to_string(),
             llm_model_aux: String::new(),
+            llm_model_tool: String::new(),
             llm_provider: String::new(),
             llm_api_base: String::new(),
             llm_context_limit: 100_000,
@@ -400,5 +418,13 @@ mod tests {
         assert_eq!(settings.effective_aux_model(), "gpt-5");
         settings.llm.llm_model_aux = "gpt-5-mini".to_string();
         assert_eq!(settings.effective_aux_model(), "gpt-5-mini");
+    }
+
+    #[test]
+    fn effective_tool_model_empty_until_set() {
+        let mut settings = test_settings(std::path::Path::new("/tmp/lethe"));
+        assert_eq!(settings.effective_tool_model(), "");
+        settings.llm.llm_model_tool = "  deepseek/deepseek-v4-pro  ".to_string();
+        assert_eq!(settings.effective_tool_model(), "deepseek/deepseek-v4-pro");
     }
 }

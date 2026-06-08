@@ -211,6 +211,8 @@ impl LlmMessage {
 pub struct LlmRouterConfig {
     pub model: String,
     pub aux_model: String,
+    /// Optional dedicated model for tool chains. Empty = no mid-turn switch.
+    pub tool_model: String,
     pub provider: String,
     pub api_base: String,
     pub max_output_tokens: u32,
@@ -222,6 +224,7 @@ impl LlmRouterConfig {
         Self {
             model: settings.llm.llm_model.clone(),
             aux_model: settings.effective_aux_model().to_string(),
+            tool_model: settings.effective_tool_model().to_string(),
             provider: settings.llm.llm_provider.clone(),
             api_base: settings.llm.llm_api_base.clone(),
             max_output_tokens: settings.llm.llm_max_output,
@@ -235,6 +238,18 @@ impl LlmRouterConfig {
         } else {
             &self.model
         }
+    }
+
+    /// The dedicated tool-chain model id (may be empty).
+    pub fn tool_model(&self) -> &str {
+        self.tool_model.trim()
+    }
+
+    /// Whether a dedicated tool-chain model is configured and actually differs
+    /// from the primary model (otherwise switching to it would be a no-op).
+    pub fn has_tool_model(&self) -> bool {
+        let tool = self.tool_model.trim();
+        !tool.is_empty() && tool != self.model.trim()
     }
 
     pub fn chat_options(&self) -> ChatOptions {
@@ -291,10 +306,25 @@ impl LlmRouter {
         use_aux: bool,
         on_delta: DeltaCallback<'_>,
     ) -> Result<ChatResponse> {
-        let model = self.config.model_for(use_aux).trim();
+        let model = self.config.model_for(use_aux).to_string();
+        self.exec_chat_request_stream_with_model(request, &model, on_delta)
+            .await
+    }
+
+    /// Like [`Self::exec_chat_request_stream`] but with an explicit model id,
+    /// used by the agent loop's dynamic tool-model router so a single turn can
+    /// switch models mid-flight.
+    pub async fn exec_chat_request_stream_with_model(
+        &self,
+        request: ChatRequest,
+        model: &str,
+        on_delta: DeltaCallback<'_>,
+    ) -> Result<ChatResponse> {
+        let model = model.trim();
         if model.is_empty() {
             bail!("LLM_MODEL is not set.");
         }
+        let use_aux = model != self.config.model.trim();
         let options = self.config.chat_options();
         if let Some(oauth) = &self.openai_oauth
             && should_use_openai_oauth(model, &self.config)
@@ -341,7 +371,7 @@ impl LlmRouter {
                     request_log,
                     json!({ "ok": false, "error": format!("{error:#}") }),
                 );
-                let response = self.exec_chat_request(request, use_aux).await?;
+                let response = self.exec_chat_request_with_model(request, model).await?;
                 if let Some(text) = response.first_text() {
                     on_delta(text);
                 }
@@ -414,7 +444,18 @@ impl LlmRouter {
         request: ChatRequest,
         use_aux: bool,
     ) -> Result<ChatResponse> {
-        let model = self.config.model_for(use_aux).trim();
+        let model = self.config.model_for(use_aux).to_string();
+        self.exec_chat_request_with_model(request, &model).await
+    }
+
+    /// Like [`Self::exec_chat_request`] but with an explicit model id, used by
+    /// the agent loop's dynamic tool-model router.
+    pub async fn exec_chat_request_with_model(
+        &self,
+        request: ChatRequest,
+        model: &str,
+    ) -> Result<ChatResponse> {
+        let model = model.trim();
         if model.is_empty() {
             bail!(
                 "LLM_MODEL is not set. Run `lethe init` for guided setup, or \
@@ -422,6 +463,7 @@ impl LlmRouter {
                  known ids and provider keys)."
             );
         }
+        let use_aux = model != self.config.model.trim();
 
         let options = self.config.chat_options();
         if let Some(oauth) = &self.openai_oauth
@@ -2274,6 +2316,7 @@ mod tests {
         let config = LlmRouterConfig {
             model: "gpt-5".to_string(),
             aux_model: String::new(),
+            tool_model: String::new(),
             provider: String::new(),
             api_base: String::new(),
             max_output_tokens: 100,
@@ -2282,6 +2325,29 @@ mod tests {
 
         assert_eq!(config.model_for(false), "gpt-5");
         assert_eq!(config.model_for(true), "gpt-5");
+    }
+
+    #[test]
+    fn has_tool_model_only_when_set_and_distinct() {
+        let mut config = LlmRouterConfig {
+            model: "gemma".to_string(),
+            aux_model: String::new(),
+            tool_model: String::new(),
+            provider: String::new(),
+            api_base: String::new(),
+            max_output_tokens: 100,
+            temperature_millidegrees: 500,
+        };
+        // Unset -> no switching.
+        assert!(!config.has_tool_model());
+        assert_eq!(config.tool_model(), "");
+        // Same as primary -> switching would be a no-op, so report none.
+        config.tool_model = "gemma".to_string();
+        assert!(!config.has_tool_model());
+        // Distinct -> switch.
+        config.tool_model = "deepseek".to_string();
+        assert!(config.has_tool_model());
+        assert_eq!(config.tool_model(), "deepseek");
     }
 
     #[test]
@@ -2403,6 +2469,7 @@ mod tests {
         let config = LlmRouterConfig {
             model: "openrouter/moonshotai/kimi-k2.6".to_string(),
             aux_model: String::new(),
+            tool_model: String::new(),
             provider: String::new(),
             api_base: String::new(),
             max_output_tokens: 100,
@@ -2422,6 +2489,7 @@ mod tests {
         let config = LlmRouterConfig {
             model: "moonshotai/kimi-k2.6".to_string(),
             aux_model: String::new(),
+            tool_model: String::new(),
             provider: "openrouter".to_string(),
             api_base: String::new(),
             max_output_tokens: 100,
@@ -2440,6 +2508,7 @@ mod tests {
         let config = LlmRouterConfig {
             model: "openai/gemma-4-31B-it-Q8_0.gguf".to_string(),
             aux_model: String::new(),
+            tool_model: String::new(),
             provider: "openai".to_string(),
             api_base: "http://localhost:8090/v1".to_string(),
             max_output_tokens: 100,
@@ -2459,6 +2528,7 @@ mod tests {
         let config = LlmRouterConfig {
             model: "anthropic/claude-sonnet-4-6".to_string(),
             aux_model: String::new(),
+            tool_model: String::new(),
             provider: String::new(),
             api_base: String::new(),
             max_output_tokens: 100,
@@ -2478,6 +2548,7 @@ mod tests {
         let mut config = LlmRouterConfig {
             model: "gpt-5.2".to_string(),
             aux_model: String::new(),
+            tool_model: String::new(),
             provider: "openai".to_string(),
             api_base: String::new(),
             max_output_tokens: 100,
@@ -2496,6 +2567,7 @@ mod tests {
         let config = LlmRouterConfig {
             model: "openrouter/openai/gpt-5.2".to_string(),
             aux_model: String::new(),
+            tool_model: String::new(),
             provider: "openai".to_string(),
             api_base: String::new(),
             max_output_tokens: 100,
@@ -2507,6 +2579,7 @@ mod tests {
         let config = LlmRouterConfig {
             model: "gpt-5.2".to_string(),
             aux_model: String::new(),
+            tool_model: String::new(),
             provider: "openai".to_string(),
             api_base: "http://localhost:8080/v1/".to_string(),
             max_output_tokens: 100,
@@ -2520,6 +2593,7 @@ mod tests {
         let config = LlmRouterConfig {
             model: "claude-opus-4-6".to_string(),
             aux_model: String::new(),
+            tool_model: String::new(),
             provider: "anthropic".to_string(),
             api_base: String::new(),
             max_output_tokens: 100,
