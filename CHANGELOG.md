@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.22.16 - Stream reasoning (live "thinking") on the API
+
+- **Reasoning tokens now stream on a separate channel.** The genai streaming path
+  forwards `ReasoningChunk` deltas to a new `TurnObserver::on_reasoning_delta`,
+  and the HTTP API emits them as `assistant.reasoning` SSE events (distinct from
+  `assistant.delta`). Clients can render a live "thinking…" indicator instead of
+  sitting through dead-air while the model reasons before answering. No change to
+  the agent loop or non-streaming paths.
+
 ## 0.22.15 - Leaner initial tool set (better prefill)
 
 - **The top-level agent now loads ~12 tools up front instead of ~30.** Two
