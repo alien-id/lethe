@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.22.20 - Streaming truncation fix
+
+- **Streamed replies no longer lose their final tokens.** vLLM-based providers
+  batch the last content delta into the same SSE frame as `finish_reason`; the
+  vendored genai OpenAI streamer discarded that frame's content, cutting
+  replies mid-sentence — the trailing words and punctuation were missing from
+  both the live stream and persisted history (~1 in 3 turns on Lightning).
+  The finish_reason branch now captures and emits batched content and
+  reasoning content, mirroring its existing tool_calls rescue.
+
 ## 0.22.19 - Overridable autonomy prompts
 
 - **All model-facing strings from 0.22.18 moved into the prompt template
