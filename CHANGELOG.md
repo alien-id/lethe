@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.22.19 - Overridable autonomy prompts
+
+- **All model-facing strings from 0.22.18 moved into the prompt template
+  system.** The wrap-up checkpoint nudge, active-tasks preamble, heartbeat
+  open-work wrapper, subagent previous-turn header, restart notice, and
+  max-turns handoff were hardcoded in Rust; they now live in
+  `config/prompts/*.md` — embedded as defaults, listed by `lethe prompts
+  export`, and overridable per-install from `workspace/prompts/`.
+- **Sharper action-discipline examples.** Positive examples no longer show a
+  `[tool_call: ...]` pseudo-code notation that models mimicked as text instead
+  of making real tool calls.
+- **CI: release workflows on Node 24 runtimes** (checkout v6,
+  upload-artifact v7, download-artifact v8, action-gh-release v3) ahead of
+  GitHub's 2026-06-16 forced migration.
+
 ## 0.22.18 - Long-horizon autonomy
 
 - **Subagent state survives restarts.** Every actor mutation is snapshotted to an
