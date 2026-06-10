@@ -32,8 +32,8 @@ use crate::llm::{
 use crate::memory::message_metadata::MessageMetadata;
 use crate::memory::messages::{MessageHistoryError, MessageRole, StoredMessage};
 use crate::memory::recall::{Hippocampus, HippocampusConfig, HippocampusError};
-use crate::scheduler::curator::{CuratorError, CuratorRunStats, MemoryCurator};
 use crate::memory::{MemoryStore, MemoryStoreError};
+use crate::scheduler::curator::{CuratorError, CuratorRunStats, MemoryCurator};
 use crate::tools::registry::{
     ActorToolContext, SharedActorRegistry, ToolRuntime, requestable_tools_directory_for,
 };
@@ -160,6 +160,41 @@ pub struct Agent {
     /// Broadcast of conversation messages from non-requesting transports (e.g.
     /// Telegram), so an open web client can append them live via `/events`.
     conversation_tx: broadcast::Sender<ConversationEvent>,
+    /// In-flight conversation-summary update from the previous turn. The next
+    /// turn briefly waits on this before assembling its prompt so a fast
+    /// follow-up message can't read the summary block before the dropped
+    /// batch has been merged into it (the old detached spawn raced exactly
+    /// that way and lost context silently).
+    pending_summary: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+}
+
+/// How long the next turn waits for the previous turn's summary update before
+/// proceeding anyway. Bounded so a slow aux model degrades to the old racy
+/// behavior instead of blocking the user.
+const SUMMARY_SYNC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Await a previously spawned background task, bounded by `timeout`. Clears
+/// the slot when the task finished; leaves it in place (still running,
+/// detached) on timeout. Free function so the sync-point semantics are unit
+/// testable without an Agent.
+async fn await_pending_task(
+    slot: &tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+    timeout: std::time::Duration,
+) {
+    let mut guard = slot.lock().await;
+    let Some(handle) = guard.as_mut() else {
+        return;
+    };
+    match tokio::time::timeout(timeout, &mut *handle).await {
+        Ok(_) => {
+            *guard = None;
+        }
+        Err(_) => {
+            tracing::warn!(
+                "previous turn's summary update still running at next turn start — proceeding without it"
+            );
+        }
+    }
 }
 
 impl Agent {
@@ -173,11 +208,22 @@ impl Agent {
         let last_prompt_tokens = Arc::new(AtomicU64::new(0));
         let (actor_registry, principal_actor_id) = if settings.background.actors_enabled {
             let mut registry = ActorRegistry::new();
+            // Durable actor state: snapshots every mutation into the unified
+            // memory DB and rehydrates unfinished subagents after a restart —
+            // a deploy or self-restart interrupts work instead of erasing it.
+            match crate::actor::ActorStore::open(settings.paths.memory_dir.join("lethe-memory.db"))
+            {
+                Ok(store) => registry.set_store(store),
+                Err(error) => {
+                    tracing::warn!(error = %error, "actor store unavailable — actor state will not survive restarts");
+                }
+            }
             let principal_id = registry.spawn(
                 ActorConfig::new("cortex", "Serve the user.").in_group("main"),
                 None,
                 true,
             );
+            registry.restore_unfinished(&principal_id);
             let runtime = ActorRuntime::new(registry);
             runtime
                 .install_turn_executor(actor_turn_executor(
@@ -204,6 +250,7 @@ impl Agent {
             processed_notification_events: Mutex::new(HashSet::new()),
             last_prompt_tokens,
             conversation_tx: broadcast::channel(CONVERSATION_EVENT_DEPTH).0,
+            pending_summary: tokio::sync::Mutex::new(None),
         })
     }
 
@@ -281,6 +328,9 @@ impl Agent {
 
     /// Assemble the LLM messages for a single turn without calling the model.
     pub async fn prepare_turn(&self, req: &TurnRequest) -> AgentResult<AgentTurn> {
+        // Sync point: the prompt reads the conversation_summary block, so let
+        // the previous turn's in-flight summary update land first (bounded).
+        await_pending_task(&self.pending_summary, SUMMARY_SYNC_TIMEOUT).await;
         let mut request_options = req.options.clone();
         let last_prompt_tokens = match self.last_prompt_tokens.load(Ordering::Relaxed) {
             0 => None,
@@ -323,13 +373,8 @@ impl Agent {
         Ok(turn)
     }
 
-    async fn requestable_tools_directory_async(
-        &self,
-        req: &TurnRequest,
-    ) -> AgentResult<String> {
-        if let (Some(registry), Some(actor_id)) =
-            (&self.actor_registry, &self.principal_actor_id)
-        {
+    async fn requestable_tools_directory_async(&self, req: &TurnRequest) -> AgentResult<String> {
+        if let (Some(registry), Some(actor_id)) = (&self.actor_registry, &self.principal_actor_id) {
             return registry
                 .build_requestable_directory(actor_id)
                 .await
@@ -369,48 +414,62 @@ impl Agent {
             .await?;
         if !turn.synthetic {
             let history_content = assistant_history_content(&response);
-            self.memory
-                .messages
-                .add(MessageRole::Assistant, &history_content, None)?;
+            // Don't persist whitespace-only final replies — unlike the loop's
+            // per-iteration rows (whose tool_calls metadata pairs the tool
+            // results that follow), an empty row here is pure noise.
+            if !history_content.trim().is_empty() {
+                self.memory
+                    .messages
+                    .add(MessageRole::Assistant, &history_content, None)?;
+            }
         }
         // Post-turn memory maintenance — rolling the dropped batch into the
         // persistent conversation_summary, plus the cadence-gated curator pass —
         // is background work that makes aux-model LLM calls. It must NEVER block
         // the user-facing reply / `done` (otherwise the client sits on a typing
-        // indicator after the answer is already complete). Spawn it detached;
-        // errors are logged, never propagated.
+        // indicator after the answer is already complete). Errors are logged,
+        // never propagated. The summary task's handle is kept so the NEXT turn
+        // can wait for it before reading the summary block (see prepare_turn);
+        // the curator stays fully detached — nothing downstream reads its output
+        // synchronously.
         let needs_summary = !dropped_for_summary.is_empty();
         let curator_enabled = self.settings.background.curator_enabled;
-        if !turn.synthetic && (needs_summary || curator_enabled) {
+        if !turn.synthetic && needs_summary {
             let memory = self.memory.clone();
             let router = self.router.clone();
             let prompts = self.prompts.clone();
-            let memory_dir = self.settings.paths.memory_dir.clone();
-            tokio::spawn(async move {
-                if needs_summary
-                    && let Err(error) = summarizer::update_conversation_summary(
-                        memory.as_ref(),
-                        &prompts,
-                        router.clone(),
-                        &dropped_for_summary,
-                    )
-                    .await
+            let handle = tokio::spawn(async move {
+                if let Err(error) = summarizer::update_conversation_summary(
+                    memory.as_ref(),
+                    &prompts,
+                    router,
+                    &dropped_for_summary,
+                )
+                .await
                 {
                     tracing::warn!(error = %error, "conversation summary update failed");
                 }
-                if curator_enabled {
-                    let router_snapshot = match router.read() {
-                        Ok(guard) => guard.clone(),
-                        Err(error) => {
-                            tracing::warn!(error = %error, "router lock poisoned in curator pass");
-                            return;
-                        }
-                    };
-                    let curator = MemoryCurator::new(memory_dir.join("curator_state.json"));
-                    if let Err(error) = curator.run_pass(memory.as_ref(), &router_snapshot, false).await
-                    {
-                        tracing::warn!(error = %error, "curator pass failed");
+            });
+            *self.pending_summary.lock().await = Some(handle);
+        }
+        if !turn.synthetic && curator_enabled {
+            let memory = self.memory.clone();
+            let router = self.router.clone();
+            let memory_dir = self.settings.paths.memory_dir.clone();
+            tokio::spawn(async move {
+                let router_snapshot = match router.read() {
+                    Ok(guard) => guard.clone(),
+                    Err(error) => {
+                        tracing::warn!(error = %error, "router lock poisoned in curator pass");
+                        return;
                     }
+                };
+                let curator = MemoryCurator::new(memory_dir.join("curator_state.json"));
+                if let Err(error) = curator
+                    .run_pass(memory.as_ref(), &router_snapshot, false)
+                    .await
+                {
+                    tracing::warn!(error = %error, "curator pass failed");
                 }
             });
         }
@@ -435,6 +494,29 @@ impl Agent {
         Ok(curator
             .run_pass(self.memory.as_ref(), &router, force)
             .await?)
+    }
+
+    /// Everything the system is on the hook for right now: unfinished
+    /// subagents (including Blocked ones that will never autocontinue) and
+    /// in-progress/overdue todos. Feeds the heartbeat so background ticks are
+    /// need-driven — a tick with open work is never silently skipped.
+    /// Best-effort: failures degrade to an empty digest, never an error.
+    pub async fn open_work_digest(&self) -> String {
+        let mut lines = Vec::new();
+        if let Some(registry) = &self.actor_registry {
+            match registry.open_work_lines().await {
+                Ok(actor_lines) => lines.extend(actor_lines),
+                Err(error) => {
+                    tracing::warn!(error = %error, "actor open-work query failed")
+                }
+            }
+        }
+        match self.memory.todos.open_work_digest(20) {
+            Ok(digest) if !digest.trim().is_empty() => lines.push(digest),
+            Ok(_) => {}
+            Err(error) => tracing::warn!(error = %error, "todo open-work digest failed"),
+        }
+        lines.join("\n")
     }
 
     pub async fn process_background_heartbeat(
@@ -472,9 +554,7 @@ impl Agent {
                 let router = self
                     .router
                     .read()
-                    .map_err(|error| {
-                        AgentError::Llm(anyhow!("router lock poisoned: {error}"))
-                    })?
+                    .map_err(|error| AgentError::Llm(anyhow!("router lock poisoned: {error}")))?
                     .clone();
                 crate::actor::background::review_notifications_with_llm(
                     candidates,
@@ -500,7 +580,11 @@ impl Agent {
             if !message.role.is_user() && !message.role.is_assistant() {
                 continue;
             }
-            let role = if message.role.is_user() { "user" } else { "assistant" };
+            let role = if message.role.is_user() {
+                "user"
+            } else {
+                "assistant"
+            };
             let content = message.content.trim();
             if content.is_empty() {
                 continue;
@@ -593,7 +677,7 @@ impl Agent {
         use_aux: bool,
         record_tool_messages: bool,
     ) -> AgentResult<String> {
-        complete_turn_with_tools_config_shared(
+        let output = complete_turn_with_tools_config_shared(
             TurnExecutionContext {
                 settings: self.settings.clone(),
                 memory: self.memory.clone(),
@@ -606,10 +690,15 @@ impl Agent {
             use_aux,
             record_tool_messages,
         )
-        .await
+        .await?;
+        if let Some(reason) = &output.stop_reason {
+            // The reply is a checkpoint, not a finished answer. It persists in
+            // conversation history, so the next turn resumes from it.
+            tracing::warn!(reason = %reason, "turn cut short — reply is a resumable checkpoint");
+        }
+        Ok(output.text)
     }
 }
-
 
 pub fn prepare_turn(
     settings: &Settings,
@@ -648,6 +737,17 @@ pub fn prepare_turn(
     };
     messages.push(user_message);
 
+    // Hard backstop behind the soft compaction budget: guarantee the assembled
+    // prompt fits the model's context window minus the output reservation, so a
+    // bad overhead estimate can't push us past the provider's limit (and onto a
+    // slow fallback). The tools array isn't in `messages`, so this leaves the
+    // remaining headroom for it implicitly.
+    let context_tokens = settings.llm.context_limit_for(&settings.llm.llm_model);
+    let max_total_chars = context_tokens
+        .saturating_sub(settings.llm.llm_max_output as u64)
+        .saturating_mul(CHARS_PER_TOKEN as u64) as usize;
+    clamp_messages_to_budget(&mut messages, max_total_chars);
+
     Ok(AgentTurn {
         messages,
         recall,
@@ -681,7 +781,10 @@ impl SystemParts {
     /// Flatten back to a single string. Used by tests that still assert on the
     /// monolithic prompt shape.
     pub fn render_joined(&self) -> String {
-        match (self.stable.trim().is_empty(), self.volatile.trim().is_empty()) {
+        match (
+            self.stable.trim().is_empty(),
+            self.volatile.trim().is_empty(),
+        ) {
             (true, true) => String::new(),
             (false, true) => self.stable.clone(),
             (true, false) => self.volatile.clone(),
@@ -716,6 +819,23 @@ fn build_system_prompt(
     if !summary.trim().is_empty() {
         volatile_builder.block("conversation_summary", summary);
     }
+    // Standing work commitments — in-progress and overdue todos — are injected
+    // every turn so unfinished work survives context compaction and session
+    // restarts without the model having to remember to call todo_list.
+    match memory.todos.open_work_digest(ACTIVE_TASKS_PROMPT_LIMIT) {
+        Ok(digest) if !digest.trim().is_empty() => {
+            volatile_builder.block(
+                "active_tasks",
+                format!(
+                    "Your open work (in-progress and overdue todos). Keep statuses honest: \
+                     mark items in_progress when you start, completed when done \
+                     (todo_update / todo_complete).\n{digest}"
+                ),
+            );
+        }
+        Ok(_) => {}
+        Err(error) => tracing::warn!(error = %error, "active-tasks digest failed"),
+    }
     volatile_builder.raw(memory_volatile).raw(clock_block);
 
     if let Some(recall) = recall.filter(|value| !value.trim().is_empty()) {
@@ -744,6 +864,10 @@ fn build_system_prompt(
 /// active context budget.
 const HISTORY_FETCH_LIMIT: usize = 500;
 
+/// Cap on the `<active_tasks>` lines injected into every system prompt. Keeps
+/// the standing work block cheap even with a crowded todo list.
+const ACTIVE_TASKS_PROMPT_LIMIT: usize = 10;
+
 fn history_records_for_turn(recent: Vec<StoredMessage>) -> Vec<StoredMessage> {
     let mut history = Vec::new();
     let mut inside_internal_turn = false;
@@ -766,7 +890,6 @@ fn history_records_for_turn(recent: Vec<StoredMessage>) -> Vec<StoredMessage> {
     drop_history_before_first_user(&mut history);
     history
 }
-
 
 fn is_visible_history_record(message: &StoredMessage) -> bool {
     if MessageMetadata::from_value(Some(&message.metadata)).is_internal() {
@@ -835,14 +958,12 @@ fn history_to_llm_messages(history: Vec<StoredMessage>) -> Vec<LlmMessage> {
                 let expected: std::collections::HashSet<String> =
                     calls.iter().map(|call| call.call_id.clone()).collect();
                 let mut responses: Vec<HistoricalToolResponse> = Vec::new();
-                let mut seen: std::collections::HashSet<String> =
-                    std::collections::HashSet::new();
+                let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
                 while let Some(next) = iter.peek() {
                     if !matches!(next.role, MessageRole::Tool) {
                         break;
                     }
-                    let Some(call_id) =
-                        next.metadata.get("tool_call_id").and_then(Value::as_str)
+                    let Some(call_id) = next.metadata.get("tool_call_id").and_then(Value::as_str)
                     else {
                         // Tool message without a tool_call_id — orphan, skip.
                         iter.next();
@@ -868,7 +989,10 @@ fn history_to_llm_messages(history: Vec<StoredMessage>) -> Vec<LlmMessage> {
                 if seen.len() != expected.len() {
                     continue;
                 }
-                out.push(LlmMessage::assistant_with_tool_calls(message.content, calls));
+                out.push(LlmMessage::assistant_with_tool_calls(
+                    message.content,
+                    calls,
+                ));
                 out.push(LlmMessage::tool_results(responses));
             }
             // Orphaned tool result (no preceding assistant tool_call). Skip.
@@ -903,15 +1027,15 @@ fn extract_historical_tool_calls(metadata: &Value) -> Vec<HistoricalToolCall> {
                                 .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
                         })
                         .unwrap_or(Value::Object(serde_json::Map::new()));
-                    let thought_signatures =
-                        call.get("thought_signatures").and_then(Value::as_array).map(
-                            |values| {
-                                values
-                                    .iter()
-                                    .filter_map(|value| value.as_str().map(str::to_string))
-                                    .collect::<Vec<_>>()
-                            },
-                        );
+                    let thought_signatures = call
+                        .get("thought_signatures")
+                        .and_then(Value::as_array)
+                        .map(|values| {
+                            values
+                                .iter()
+                                .filter_map(|value| value.as_str().map(str::to_string))
+                                .collect::<Vec<_>>()
+                        });
                     Some(HistoricalToolCall {
                         call_id: call_id.to_string(),
                         fn_name: fn_name.to_string(),
@@ -1156,9 +1280,9 @@ fn replace_base64_images_with_stubs(content: &str) -> String {
             if let Some(obj) = part.as_object() {
                 if obj.get("type").and_then(|v| v.as_str()) == Some("image_url") {
                     if let Some(url) = obj
-                            .get("image_url")
-                            .and_then(|iu| iu.get("url"))
-                            .and_then(|v| v.as_str())
+                        .get("image_url")
+                        .and_then(|iu| iu.get("url"))
+                        .and_then(|v| v.as_str())
                         && url.starts_with("data:image")
                     {
                         let media_type = url
@@ -1185,7 +1309,8 @@ fn replace_base64_images_with_stubs(content: &str) -> String {
 
     // Fallback: regex-strip any `data:image/...;base64,...` blobs.
     // This handles cases where content is not a clean JSON array.
-    let re = regex::Regex::new(r"data:image/[^;]+;base64,[A-Za-z0-9+/=]+").unwrap_or_else(|_| unreachable!());
+    let re = regex::Regex::new(r"data:image/[^;]+;base64,[A-Za-z0-9+/=]+")
+        .unwrap_or_else(|_| unreachable!());
     let stripped = re.replace_all(content, "[image archived]");
     if stripped != content {
         return stripped.into_owned();
@@ -1270,16 +1395,48 @@ fn archive_old_tool_results(messages: &mut [LlmMessage], inline_cap: usize) {
     }
 }
 
-fn drop_oldest_to_target(
-    messages: &mut Vec<LlmMessage>,
-    target_chars: usize,
-) -> Vec<LlmMessage> {
+/// Hard ceiling on the fully-assembled prompt, applied AFTER `compact_history`.
+///
+/// The soft compaction budget estimates the non-history overhead (system, tools,
+/// memory, recall) from half the prior prompt size. When that estimate is wrong
+/// — e.g. a runaway tool chain, or a prior measurement that doesn't reflect the
+/// current turn — history can survive well past the model's context window
+/// (observed: a 136k-token prompt against an 80k budget, which then overflows
+/// the provider's context limit and forces every call onto a slow fallback).
+///
+/// This is the guaranteed backstop: drop the oldest history messages — never the
+/// leading system head, never the final (current user) message, and never
+/// leaving a `tool_results` message without its preceding `assistant`+tool_calls
+/// — until the total character count fits `max_total_chars`.
+fn clamp_messages_to_budget(messages: &mut Vec<LlmMessage>, max_total_chars: usize) {
+    if max_total_chars == 0 {
+        return;
+    }
+    let history_start = messages
+        .iter()
+        .position(|message| message.role != LlmRole::System)
+        .unwrap_or(messages.len());
+    while total_chars(messages) > max_total_chars
+        && history_start < messages.len().saturating_sub(1)
+    {
+        messages.remove(history_start);
+        // Removing an `assistant_with_tool_calls` would orphan the `tool_results`
+        // that follow it; drop those too so the wire format stays valid.
+        while history_start < messages.len().saturating_sub(1)
+            && !messages[history_start].tool_responses.is_empty()
+        {
+            messages.remove(history_start);
+        }
+    }
+}
+
+fn drop_oldest_to_target(messages: &mut Vec<LlmMessage>, target_chars: usize) -> Vec<LlmMessage> {
     // Always keep at least the last two messages so the LLM has SOME
     // immediate context to react to.
     const MIN_RETAINED: usize = 2;
     let proposed = weighted_keep_cutoff(messages, target_chars);
-    let cutoff = pair_safe_cutoff(messages, proposed)
-        .min(messages.len().saturating_sub(MIN_RETAINED));
+    let cutoff =
+        pair_safe_cutoff(messages, proposed).min(messages.len().saturating_sub(MIN_RETAINED));
 
     let mut dropped = Vec::with_capacity(cutoff);
     for _ in 0..cutoff {
@@ -1406,6 +1563,92 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn pending_summary_sync_point_waits_then_clears() {
+        use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
+
+        // A fast summary task: the next turn must observe its side effects.
+        let done = Arc::new(AtomicBool::new(false));
+        let done_clone = done.clone();
+        let slot = tokio::sync::Mutex::new(Some(tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            done_clone.store(true, AtomicOrdering::SeqCst);
+        })));
+        await_pending_task(&slot, std::time::Duration::from_secs(5)).await;
+        assert!(
+            done.load(AtomicOrdering::SeqCst),
+            "next turn must start only after the summary task finished"
+        );
+        assert!(slot.lock().await.is_none(), "finished handle is cleared");
+
+        // A pathologically slow task: the sync point gives up after the
+        // timeout instead of blocking the user's turn forever.
+        let slow_slot = tokio::sync::Mutex::new(Some(tokio::spawn(async {
+            tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+        })));
+        let started = std::time::Instant::now();
+        await_pending_task(&slow_slot, std::time::Duration::from_millis(50)).await;
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+        let guard = slow_slot.lock().await;
+        assert!(guard.is_some(), "unfinished handle stays for a later check");
+        guard.as_ref().unwrap().abort();
+    }
+
+    #[test]
+    fn prepare_turn_injects_open_work_into_system_prompt() {
+        let tmp = tempdir().unwrap();
+        let settings = settings(tmp.path());
+        let memory = MemoryStore::from_settings(&settings).unwrap();
+        let prompts = PromptStore::new(&settings.paths.workspace_dir, &settings.paths.config_dir);
+
+        // No open work — no <active_tasks> block at all.
+        let turn = prepare_turn(
+            &settings,
+            &memory,
+            &prompts,
+            "hello",
+            Vec::new(),
+            None,
+            &AgentOptions::default(),
+        )
+        .unwrap();
+        assert!(!system_content(&turn.messages).contains("<active_tasks>"));
+
+        // An in-progress todo shows up in every subsequent prompt, unprompted.
+        let id = memory
+            .todos
+            .create(crate::todos::NewTodo {
+                title: "finish the migration plan".to_string(),
+                ..Default::default()
+            })
+            .unwrap();
+        memory
+            .todos
+            .update(
+                id,
+                crate::todos::TodoUpdate {
+                    status: Some(crate::todos::TodoStatus::InProgress),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        let turn = prepare_turn(
+            &settings,
+            &memory,
+            &prompts,
+            "hello again",
+            Vec::new(),
+            None,
+            &AgentOptions::default(),
+        )
+        .unwrap();
+        let system = system_content(&turn.messages);
+        assert!(system.contains("<active_tasks>"));
+        assert!(system.contains("finish the migration plan"));
+        assert!(system.contains("[in_progress]"));
+    }
+
     #[test]
     fn prepare_turn_excludes_tool_loop_chatter_from_history() {
         let tmp = tempdir().unwrap();
@@ -1423,7 +1666,11 @@ mod tests {
             .unwrap();
         memory
             .messages
-            .add(MessageRole::Tool, "secret tool output", Some(json!({"name": "bash"})))
+            .add(
+                MessageRole::Tool,
+                "secret tool output",
+                Some(json!({"name": "bash"})),
+            )
             .unwrap();
         memory
             .messages
@@ -1453,9 +1700,17 @@ mod tests {
             .iter()
             .map(|message| message.content.as_str())
             .collect::<Vec<_>>();
-        assert!(!contents.iter().any(|c| c.contains("I will inspect that now.")));
+        assert!(
+            !contents
+                .iter()
+                .any(|c| c.contains("I will inspect that now."))
+        );
         assert!(!contents.iter().any(|c| c.contains("secret tool output")));
-        assert!(contents.iter().any(|c| c.ends_with("previous visible user request")));
+        assert!(
+            contents
+                .iter()
+                .any(|c| c.ends_with("previous visible user request"))
+        );
         assert!(contents.contains(&"previous visible answer"));
         let system = system_content(&turn.messages);
         assert!(!system.contains("recent_tool_history"));
@@ -1664,6 +1919,58 @@ mod tests {
     }
 
     #[test]
+    fn clamp_messages_bounds_prompt_and_keeps_system_and_last() {
+        let mut messages = vec![
+            LlmMessage::system("S".repeat(20)),
+            LlmMessage::user("a".repeat(500)),
+            LlmMessage::assistant("b".repeat(500)),
+            LlmMessage::user("c".repeat(500)),
+            LlmMessage::user("CURRENT".to_string()),
+        ];
+        clamp_messages_to_budget(&mut messages, 100);
+        // Fits the hard budget…
+        assert!(
+            total_chars(&messages) <= 100,
+            "total={}",
+            total_chars(&messages)
+        );
+        // …while always preserving the system head and the current user turn.
+        assert_eq!(messages.first().unwrap().role, LlmRole::System);
+        assert_eq!(messages.last().unwrap().content, "CURRENT");
+    }
+
+    #[test]
+    fn clamp_messages_drops_orphaned_tool_results() {
+        // [system, assistant+tool_calls, tool_results, user]. Dropping the
+        // assistant must also drop its now-orphaned tool_results so the kept
+        // history never starts with a dangling tool result.
+        let mut messages = vec![
+            LlmMessage::system("S"),
+            LlmMessage::assistant_with_tool_calls(
+                "x".repeat(400),
+                vec![HistoricalToolCall {
+                    call_id: "c1".into(),
+                    fn_name: "read_file".into(),
+                    fn_arguments: json!({}),
+                    thought_signatures: None,
+                }],
+            ),
+            LlmMessage::tool_results(vec![HistoricalToolResponse {
+                call_id: "c1".into(),
+                content: "y".repeat(400),
+                source_message_id: Some("m1".into()),
+            }]),
+            LlmMessage::user("CURRENT".to_string()),
+        ];
+        clamp_messages_to_budget(&mut messages, 50);
+        // The tool_call/tool_result pair is gone as a unit; no leading orphan.
+        assert!(messages.iter().all(|m| m.tool_responses.is_empty()));
+        assert!(messages.iter().all(|m| m.tool_calls.is_empty()));
+        assert_eq!(messages.first().unwrap().role, LlmRole::System);
+        assert_eq!(messages.last().unwrap().content, "CURRENT");
+    }
+
+    #[test]
     fn prepare_turn_drops_orphan_tool_call_pairs() {
         let tmp = tempdir().unwrap();
         let settings = settings(tmp.path());
@@ -1741,7 +2048,11 @@ mod tests {
 
         memory
             .messages
-            .add(MessageRole::User, "internal heartbeat prompt", Some(internal.clone()))
+            .add(
+                MessageRole::User,
+                "internal heartbeat prompt",
+                Some(internal.clone()),
+            )
             .unwrap();
         memory
             .messages
@@ -1771,8 +2082,16 @@ mod tests {
             .iter()
             .map(|message| message.content.as_str())
             .collect::<Vec<_>>();
-        assert!(!contents.iter().any(|c| c.contains("internal heartbeat prompt")));
-        assert!(!contents.iter().any(|c| c.contains("internal heartbeat answer")));
+        assert!(
+            !contents
+                .iter()
+                .any(|c| c.contains("internal heartbeat prompt"))
+        );
+        assert!(
+            !contents
+                .iter()
+                .any(|c| c.contains("internal heartbeat answer"))
+        );
         assert!(contents.iter().any(|c| c.ends_with("visible question")));
     }
 
@@ -2004,7 +2323,10 @@ mod tests {
             "archived images should reduce char count: {after_chars} vs {before_chars}"
         );
         // The old image should be gone
-        assert!(messages[1].content.chars().count() < 1000, "old image msg should be small after archival");
+        assert!(
+            messages[1].content.chars().count() < 1000,
+            "old image msg should be small after archival"
+        );
     }
 
     #[test]

@@ -19,8 +19,8 @@ use uuid::Uuid;
 use crate::actor::{ActorError, ActorRunSpec, ActorRuntime, ActorTurnExecutor, ModelTier};
 use crate::config::Settings;
 use crate::llm::{LlmAttachment, LlmMessage, LlmRouter, build_chat_request};
-use crate::memory::MessageRole;
 use crate::memory::MemoryStore;
+use crate::memory::MessageRole;
 use crate::tools::registry::{ActorToolContext, BoxToolFuture, ToolRegistry, ToolRuntime};
 use crate::tools::shell::ShellTools;
 
@@ -30,7 +30,12 @@ use super::{AgentError, AgentResult};
 /// with up to 5 auto-continuation batches (~50 total); we collapse that into
 /// a single flat cap.
 pub(super) const MAX_TOOL_ITERATIONS: usize = 50;
-const MAX_TOOL_ERRORS: usize = 8;
+/// Error budget for the turn, in weighted units: a permanent error costs 2,
+/// a transient one (network flap, timeout, rate limit) costs 1. Eight
+/// permanent failures trip the breaker exactly as the old flat cap did, but
+/// a long task using flaky external tools gets twice the slack before being
+/// cut off.
+const MAX_TOOL_ERROR_PRESSURE: usize = 16;
 const MAX_REPEATED_TOOL_CALLS: usize = 4;
 const MAX_NO_PROGRESS_TURNS: usize = 4;
 const MAX_EMPTY_RESPONSES: usize = 2;
@@ -85,6 +90,74 @@ fn is_error_result(result: &str) -> bool {
     result.starts_with("Error:") || result.starts_with("Unknown tool:")
 }
 
+/// Transient failures — the kind that often succeed on a later attempt
+/// (network flaps, timeouts, rate limits, upstream 5xx). These weigh half a
+/// permanent error against the circuit breaker so a long task leaning on
+/// flaky external tools isn't cut off as aggressively as one making real
+/// mistakes (wrong paths, bad arguments).
+fn is_transient_error(result: &str) -> bool {
+    if !is_error_result(result) {
+        return false;
+    }
+    let lower = result.to_ascii_lowercase();
+    const TRANSIENT_MARKERS: &[&str] = &[
+        "timeout",
+        "timed out",
+        "connection",
+        "network",
+        "temporarily",
+        "temporary",
+        "rate limit",
+        "too many requests",
+        "429",
+        "500",
+        "502",
+        "503",
+        "504",
+        "unavailable",
+        "try again",
+        "reset by peer",
+        "dns",
+    ];
+    TRANSIENT_MARKERS
+        .iter()
+        .any(|marker| lower.contains(marker))
+}
+
+/// Detects true call degeneration: the same tool invoked with the same
+/// arguments returning the same result. Legitimate polling — identical calls
+/// whose results change as the world moves — never accumulates a streak, so
+/// it no longer trips the repeated-call circuit breaker.
+#[derive(Debug, Default)]
+struct RepeatTracker {
+    last_signature: String,
+    last_fingerprint: u64,
+    streak: usize,
+}
+
+impl RepeatTracker {
+    /// Record one executed call and return the current degeneration streak
+    /// (1 = fresh, >=2 = exact repeat with identical output).
+    fn observe(&mut self, signature: &str, result: &str) -> usize {
+        let fingerprint = fingerprint_str(result);
+        if signature == self.last_signature && fingerprint == self.last_fingerprint {
+            self.streak += 1;
+        } else {
+            self.streak = 1;
+        }
+        self.last_signature = signature.to_string();
+        self.last_fingerprint = fingerprint;
+        self.streak
+    }
+}
+
+fn fingerprint_str(value: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    value.hash(&mut hasher);
+    hasher.finish()
+}
+
 /// Per-turn record of one tool execution. Currently used by circuit
 /// breakers; future callers (auto-archival) can read this back.
 #[derive(Debug, Clone)]
@@ -109,10 +182,9 @@ fn truncate_chars(value: &str, limit: usize) -> String {
 fn recover_text_tool_calls(content: &str) -> Vec<ToolCall> {
     static OUTER: OnceLock<Regex> = OnceLock::new();
     static QUOTED: OnceLock<Regex> = OnceLock::new();
-    let outer = OUTER
-        .get_or_init(|| Regex::new(r"(?s)<tool_call:(\w+)\{(.+?)\}>").expect("valid regex"));
-    let quoted =
-        QUOTED.get_or_init(|| Regex::new(r#"(\w+):"([^"]*)""#).expect("valid regex"));
+    let outer =
+        OUTER.get_or_init(|| Regex::new(r"(?s)<tool_call:(\w+)\{(.+?)\}>").expect("valid regex"));
+    let quoted = QUOTED.get_or_init(|| Regex::new(r#"(\w+):"([^"]*)""#).expect("valid regex"));
 
     let mut calls = Vec::new();
     for caps in outer.captures_iter(content) {
@@ -149,6 +221,25 @@ fn recover_text_tool_calls(content: &str) -> Vec<ToolCall> {
         });
     }
     calls
+}
+
+/// Result of one full tool-loop turn. `stop_reason` is set when the loop was
+/// cut short (circuit breaker, iteration cap, empty-response stall) rather
+/// than ending with a natural reply — callers use it to mark the response as
+/// a checkpoint to resume from instead of a finished answer.
+#[derive(Clone, Debug)]
+pub(super) struct TurnOutput {
+    pub text: String,
+    pub stop_reason: Option<String>,
+}
+
+impl TurnOutput {
+    fn complete(text: String) -> Self {
+        Self {
+            text,
+            stop_reason: None,
+        }
+    }
 }
 
 /// Bag of clones used to thread the agent's dependencies into the free-fn
@@ -205,6 +296,17 @@ pub(super) fn actor_turn_executor(
                 false,
             )
             .await
+            // A cut-short turn is marked in the recorded response so the
+            // actor sees it on its next turn (via <your_previous_turn>) and
+            // the parent sees it in any handoff — the checkpoint is explicit
+            // instead of looking like a finished answer.
+            .map(|output| match output.stop_reason {
+                Some(reason) => format!(
+                    "{}\n\n[turn ended early: {reason} — the text above is a checkpoint, not a finished result]",
+                    output.text
+                ),
+                None => output.text,
+            })
             .map_err(|error| ActorError::Runtime(error.to_string()))
         })
     })
@@ -220,7 +322,7 @@ pub(super) async fn complete_turn_with_tools_config_shared(
     runtime: ToolRuntime,
     use_aux: bool,
     record_tool_messages: bool,
-) -> AgentResult<String> {
+) -> AgentResult<TurnOutput> {
     let mut active_tools = runtime
         .requested_tools
         .iter()
@@ -238,8 +340,8 @@ pub(super) async fn complete_turn_with_tools_config_shared(
     let mut last_text = String::new();
     let mut total_tool_calls: usize = 0;
     let mut total_tool_errors: usize = 0;
-    let mut repeated_tool_call_streak: usize = 0;
-    let mut last_tool_signature = String::new();
+    let mut tool_error_pressure: usize = 0;
+    let mut repeat_tracker = RepeatTracker::default();
     let mut no_progress_turns: usize = 0;
     let mut empty_count: usize = 0;
     let mut tool_log: Vec<ToolLogEntry> = Vec::new();
@@ -327,13 +429,23 @@ pub(super) async fn complete_turn_with_tools_config_shared(
 
         if tool_calls.is_empty() {
             if !text.trim().is_empty() {
-                return Ok(text);
+                return Ok(TurnOutput::complete(flag_truncated_output(
+                    text,
+                    response.usage.completion_tokens,
+                    context.settings.llm.llm_max_output,
+                )));
             }
             // Empty content + no tool calls — model stuck. Nudge once;
             // on second strike, fall through to the no-tools wrap-up.
             empty_count += 1;
             if empty_count >= MAX_EMPTY_RESPONSES {
-                tracing::warn!(empty_count, "model stuck on empty responses, forcing wrap-up");
+                tracing::warn!(
+                    empty_count,
+                    "model stuck on empty responses, forcing wrap-up"
+                );
+                circuit_breaker_reason = Some(format!(
+                    "empty_response_stall ({empty_count} empty responses)"
+                ));
                 break;
             }
             tracing::warn!(empty_count, "empty response, nudging model");
@@ -398,22 +510,11 @@ pub(super) async fn complete_turn_with_tools_config_shared(
 
             let observer_for_tool = registry.turn_observer().cloned();
             if let Some(observer) = observer_for_tool.as_ref() {
-                observer.on_tool_start(
-                    &tool_name,
-                    &call_id,
-                    &truncate_chars(&args_string, 200),
-                );
+                observer.on_tool_start(&tool_name, &call_id, &truncate_chars(&args_string, 200));
             }
             let tool_started_at = std::time::Instant::now();
 
             let signature = format!("{tool_name}:{args_string}");
-            if signature == last_tool_signature {
-                repeated_tool_call_streak += 1;
-            } else {
-                repeated_tool_call_streak = 1;
-                last_tool_signature = signature;
-            }
-
             let should_stop_after_tool =
                 matches!(call.fn_name.as_str(), "terminate" | "restart_self");
             let raw_result = if call.fn_name == "request_tool" {
@@ -434,6 +535,21 @@ pub(super) async fn complete_turn_with_tools_config_shared(
                 format!("Unknown tool: {}", call.fn_name)
             };
             let (result, views) = extract_image_views(raw_result);
+            // Identical-call degeneration: small models re-issue the same call
+            // (observed: 5x the same web_search) until the circuit breaker cuts
+            // the whole turn. The streak only grows when call AND result are
+            // identical — polling whose output changes is real work, not
+            // degeneration. Tell the model in the result itself, where it
+            // actually looks, before the breaker has to fire.
+            let repeated_tool_call_streak = repeat_tracker.observe(&signature, &result);
+            let result = if repeated_tool_call_streak >= 2 {
+                format!(
+                    "{result}\n\n[You have made this exact call {repeated_tool_call_streak} times — \
+                     the result does not change. Do not repeat it; continue with what you have.]"
+                )
+            } else {
+                result
+            };
             tracing::info!(
                 iteration,
                 tool = %tool_name,
@@ -456,6 +572,7 @@ pub(super) async fn complete_turn_with_tools_config_shared(
             }
             if is_error {
                 total_tool_errors += 1;
+                tool_error_pressure += if is_transient_error(&result) { 1 } else { 2 };
             } else {
                 turn_had_successful_tool = true;
             }
@@ -483,12 +600,12 @@ pub(super) async fn complete_turn_with_tools_config_shared(
                 .messages
                 .push(ChatMessage::from(ToolResponse::new(call.call_id, result)));
             if should_stop_after_tool {
-                return Ok(stop_result);
+                return Ok(TurnOutput::complete(stop_result));
             }
 
-            if total_tool_errors >= MAX_TOOL_ERRORS {
+            if tool_error_pressure >= MAX_TOOL_ERROR_PRESSURE {
                 circuit_breaker_reason = Some(format!(
-                    "tool_error_cap hit ({total_tool_errors} errors >= {MAX_TOOL_ERRORS})"
+                    "tool_error_cap hit ({total_tool_errors} errors, weighted pressure {tool_error_pressure} >= {MAX_TOOL_ERROR_PRESSURE})"
                 ));
                 break;
             }
@@ -528,15 +645,15 @@ pub(super) async fn complete_turn_with_tools_config_shared(
     tracing::warn!(
         total_tool_calls,
         total_tool_errors,
+        tool_error_pressure,
         tool_log_entries = tool_log.len(),
         breaker = ?circuit_breaker_reason,
         "tool iteration limit / breaker — requesting final wrap-up response"
     );
-    let nudge = format!(
-        "[WRAP UP: You've made {total_tool_calls} tool calls. \
-         You MUST respond to the user NOW with what you have. \
-         No more tool calls.]"
-    );
+    let stop_reason = circuit_breaker_reason
+        .clone()
+        .unwrap_or_else(|| format!("tool_iteration_cap ({MAX_TOOL_ITERATIONS} iterations)"));
+    let nudge = wrap_up_nudge(total_tool_calls, &stop_reason);
     request.messages.push(ChatMessage::user(nudge));
     request.tools = None;
     let router = context
@@ -551,21 +668,85 @@ pub(super) async fn complete_turn_with_tools_config_shared(
     } else {
         router.config().model_for(use_aux).to_string()
     };
-    let response = router
-        .exec_chat_request_with_model(request, &wrap_model)
-        .await?;
+    // Stream the wrap-up like any loop iteration: it IS the user-facing answer
+    // for this turn, and a non-streaming call here meant minutes of dead air
+    // followed by a reply the streaming UI had no deltas for.
+    let observer_for_stream = registry.turn_observer().cloned();
+    let response = match observer_for_stream {
+        Some(observer) => {
+            let observer_reasoning = observer.clone();
+            let on_delta = move |chunk: &str| observer.on_assistant_delta(chunk);
+            let on_reasoning = move |chunk: &str| observer_reasoning.on_reasoning_delta(chunk);
+            router
+                .exec_chat_request_stream_with_model(
+                    request,
+                    &wrap_model,
+                    &on_delta,
+                    Some(&on_reasoning),
+                )
+                .await?
+        }
+        None => {
+            router
+                .exec_chat_request_with_model(request, &wrap_model)
+                .await?
+        }
+    };
     if let Some(prompt_tokens) = response.usage.prompt_tokens {
         context
             .last_prompt_tokens
             .store(prompt_tokens as u64, Ordering::Relaxed);
     }
     let final_text = response.first_text().unwrap_or_default().to_string();
-    if !final_text.trim().is_empty() {
-        Ok(final_text)
+    let text = if !final_text.trim().is_empty() {
+        flag_truncated_output(
+            final_text,
+            response.usage.completion_tokens,
+            context.settings.llm.llm_max_output,
+        )
     } else if !last_text.trim().is_empty() {
-        Ok(last_text)
+        last_text
     } else {
-        Ok("Task processing limit reached. The work done so far has been saved.".to_string())
+        "Task processing limit reached. The work done so far has been saved.".to_string()
+    };
+    Ok(TurnOutput {
+        text,
+        stop_reason: Some(stop_reason),
+    })
+}
+
+/// The forced wrap-up is not just "stop talking" — it demands a resumable
+/// checkpoint. The reply is persisted (conversation history for the cortex,
+/// the actor's own message log for subagents), so a structured GOAL / DONE /
+/// REMAINING / NEXT block is what lets the next turn — or a successor agent —
+/// pick the work up instead of re-deriving it.
+fn wrap_up_nudge(total_tool_calls: usize, stop_reason: &str) -> String {
+    format!(
+        "[WRAP UP — turn budget exhausted ({stop_reason}) after {total_tool_calls} tool calls. \
+         No more tool calls. Respond NOW with a resumable checkpoint: \
+         1) GOAL — what you are trying to accomplish; \
+         2) DONE — what is finished so far, with concrete artifacts (files, ids, results); \
+         3) REMAINING — what is left; \
+         4) NEXT — the exact next step to take when work resumes. \
+         This reply is saved; you or a successor will resume from it.]"
+    )
+}
+
+/// The genai layer doesn't surface `finish_reason`, so detect output-limit
+/// truncation from usage instead: a completion that consumed the entire output
+/// budget was almost certainly cut mid-thought. Mark it so the user (and the
+/// model, via history) can tell a truncated reply from a complete one.
+fn flag_truncated_output(text: String, completion_tokens: Option<i32>, max_output: u32) -> String {
+    match completion_tokens {
+        Some(used) if used >= max_output as i32 => {
+            tracing::warn!(
+                used,
+                max_output,
+                "completion consumed the full output budget — reply likely truncated"
+            );
+            format!("{text}\n\n*[reply cut off at the output token limit]*")
+        }
+        _ => text,
     }
 }
 
@@ -727,13 +908,15 @@ mod tests {
 
     #[test]
     fn recover_text_tool_calls_parses_gemma_style() {
-        let content =
-            "let me check this. <tool_call:read_file{file_path:\"/tmp/foo.txt\"}> done.";
+        let content = "let me check this. <tool_call:read_file{file_path:\"/tmp/foo.txt\"}> done.";
         let calls = recover_text_tool_calls(content);
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].fn_name, "read_file");
         assert_eq!(
-            calls[0].fn_arguments.get("file_path").and_then(Value::as_str),
+            calls[0]
+                .fn_arguments
+                .get("file_path")
+                .and_then(Value::as_str),
             Some("/tmp/foo.txt")
         );
     }
@@ -776,5 +959,83 @@ mod tests {
         assert!(is_error_result("Unknown tool: foo"));
         assert!(!is_error_result("Successfully wrote 12 bytes"));
         assert!(!is_error_result(""));
+    }
+
+    #[test]
+    fn transient_errors_are_distinguished_from_permanent_ones() {
+        // Transient: network/timeout/rate-limit shapes.
+        assert!(is_transient_error("Error: request timed out after 30s"));
+        assert!(is_transient_error("Error: connection reset by peer"));
+        assert!(is_transient_error("Error: HTTP 429 Too Many Requests"));
+        assert!(is_transient_error("Error: upstream returned 503"));
+        // Permanent: caller mistakes don't get the discount.
+        assert!(!is_transient_error("Error: file not found"));
+        assert!(!is_transient_error("Error: invalid arguments"));
+        assert!(!is_transient_error("Unknown tool: frobnicate"));
+        // Success text is never an error, transient or otherwise.
+        assert!(!is_transient_error("downloaded in 3s (no timeout)"));
+    }
+
+    #[test]
+    fn transient_errors_weigh_half_against_the_breaker() {
+        // 8 permanent errors trip the old cap; 8 transient ones do not.
+        let permanent: usize = (0..8).map(|_| 2).sum();
+        let transient: usize = (0..8).map(|_| 1).sum();
+        assert!(permanent >= MAX_TOOL_ERROR_PRESSURE);
+        assert!(transient < MAX_TOOL_ERROR_PRESSURE);
+    }
+
+    #[test]
+    fn repeat_tracker_counts_only_identical_call_and_result() {
+        let mut tracker = RepeatTracker::default();
+
+        // True degeneration: same call, same output → the streak grows one
+        // per observation and reaches the breaker threshold.
+        let mut streak = 0;
+        for expected in 1..=MAX_REPEATED_TOOL_CALLS {
+            streak = tracker.observe("web_search:{\"q\":\"rust\"}", "10 results");
+            assert_eq!(streak, expected);
+        }
+        assert!(
+            streak >= MAX_REPEATED_TOOL_CALLS,
+            "degenerate repeats must trip the breaker"
+        );
+
+        // Legitimate polling: same call, changing output → streak never grows,
+        // so the breaker doesn't kill a poll loop that is observing progress.
+        let mut poller = RepeatTracker::default();
+        assert_eq!(
+            poller.observe("bash:{\"cmd\":\"job-status\"}", "running 10%"),
+            1
+        );
+        assert_eq!(
+            poller.observe("bash:{\"cmd\":\"job-status\"}", "running 40%"),
+            1
+        );
+        assert_eq!(
+            poller.observe("bash:{\"cmd\":\"job-status\"}", "running 90%"),
+            1
+        );
+        assert_eq!(poller.observe("bash:{\"cmd\":\"job-status\"}", "done"), 1);
+
+        // A different call resets the streak.
+        assert_eq!(tracker.observe("read_file:{\"p\":\"a\"}", "contents"), 1);
+    }
+
+    #[test]
+    fn wrap_up_nudge_demands_resumable_checkpoint() {
+        let nudge = wrap_up_nudge(50, "tool_iteration_cap (50 iterations)");
+        assert!(nudge.contains("GOAL"));
+        assert!(nudge.contains("DONE"));
+        assert!(nudge.contains("REMAINING"));
+        assert!(nudge.contains("NEXT"));
+        assert!(nudge.contains("tool_iteration_cap"));
+        assert!(nudge.contains("No more tool calls"));
+
+        let breaker_nudge = wrap_up_nudge(
+            12,
+            "tool_error_cap hit (6 errors, weighted pressure 12 >= 16)",
+        );
+        assert!(breaker_nudge.contains("tool_error_cap"));
     }
 }

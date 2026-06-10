@@ -89,7 +89,7 @@ Core runtime pieces:
 | LLM routing | `src/llm/` | `genai` client, OAuth (ChatGPT Plus/Pro, Claude Pro/Max) and API-key auth, OpenRouter prompt-cache forwarding via vendored genai patch, model metadata. |
 | Memory | `src/memory/` | Markdown memory blocks, SQLite-vec recall tables (`memory`, `message_history`, plus their `*_vec` virtual siblings), SQLite todos. |
 | Recall | `src/hippocampus.rs` | Hybrid lexical/vector recall over notes, archival memories, and conversation history. |
-| Actors | `src/actor.rs`, `src/background.rs` | Resident Kameo actors, supervisor-owned state, mailbox/event routing, autonomous subagent wakeups, persistent DMN. |
+| Actors | `src/actor.rs`, `src/actor/` | Resident Kameo actors, supervisor-owned state, mailbox/event routing, autonomous subagent wakeups, persistent DMN, SQLite-backed actor snapshots that survive restarts. |
 | Notifications | `src/notification.rs`, `src/heartbeat.rs`, `src/runtime.rs` | Background candidate gating and proactive output limits. |
 | Transports | `src/telegram.rs`, `src/api.rs`, `src/conversation.rs` | Telegram polling, HTTP/SSE API, debounce/cancel handling. |
 | Tools | `src/tools/` | Filesystem, shell, PTY terminal, browser, image, web, memory, notes, todos, actors, transport tools. |
@@ -269,8 +269,15 @@ Lethe stores runtime state under the workspace and data directories:
 - `workspace/memory/human.md` -- facts about the user.
 - `workspace/memory/project.md` -- current project/context.
 - `workspace/notes/` -- tagged markdown notes.
-- `$MEMORY_DIR/lethe-memory.db` -- SQLite-vec database with `memory` (archival + notes, with `note-<uuid>` and `mem-<uuid>` ids), `message_history`, and their `*_vec` virtual siblings for embedding search.
-- SQLite database at `$DB_PATH` -- todos.
+- `$MEMORY_DIR/lethe-memory.db` -- SQLite-vec database with `memory` (archival + notes, with `note-<uuid>` and `mem-<uuid>` ids), `message_history`, their `*_vec` virtual siblings for embedding search, plus `todos` (with `parent_id` subtasks) and `actors` (snapshots of subagent state).
+- SQLite database at `$DB_PATH` -- legacy todos location, migrated into `lethe-memory.db` on first run.
+
+Unfinished work is first-class state, not conversation residue:
+
+- In-progress and overdue todos are injected into every system prompt as `<active_tasks>` — the agent sees its own open work without having to remember to ask.
+- The heartbeat receives an open-work digest (unfinished subagents — including blocked ones — and in-progress/overdue todos) and never skips a tick while that digest is non-empty.
+- Subagent state is snapshotted to the `actors` table on every change. After a restart (deploy, crash, self-upgrade) unfinished subagents are restored with their goals, task state, turn budget, and last checkpoint, and resume automatically.
+- When a turn hits its tool budget, the agent is forced to emit a resumable GOAL / DONE / REMAINING / NEXT checkpoint instead of a truncated answer; subagents see their own previous checkpoint each turn, and a subagent that runs out of turns hands its checkpoint to its parent for a successor.
 
 Core memory block defaults and prompt templates are embedded into the binary, so `lethe check` and first startup work without copying prompt files into the workspace.
 

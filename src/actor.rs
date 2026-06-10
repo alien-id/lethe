@@ -12,9 +12,11 @@ use tokio::sync::broadcast;
 pub mod background;
 mod helpers;
 pub mod notification;
+mod persistence;
 mod registry;
 mod runtime;
 
+pub use persistence::ActorStore;
 pub use registry::ActorRegistry;
 pub use runtime::{
     ActorNamedEvent, ActorRuntime, ActorSupervisor, ActorToolCommand, SpawnSubagent,

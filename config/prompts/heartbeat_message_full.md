@@ -2,7 +2,9 @@
 
 This is a deeper check-in. You have your full memory and context this round. Slow down. Use it.
 
-{reminders}
+{reminders}{open_work}
+Start with the open work above, if any: every BLOCKED subagent and stalled in-progress todo needs an explicit decision this round — unblock it, message it, escalate it, or close it out. Nothing on that list resumes itself.
+
 Walk through the dimensions of your principal's life that matter to you. For each one, ask: where is the picture sharp, where is it stale, where is something nagging at you?
 
 - **Work / status** — what are they building, what's stuck, what's moving? Did they say they'd do something and then go quiet about it? When did you last get a signal?

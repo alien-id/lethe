@@ -135,3 +135,14 @@ pub(super) fn format_active_children(children: &[Actor]) -> String {
 pub(super) fn truncate_chars(value: &str, limit: usize) -> String {
     crate::llm::truncate::truncate_with_ellipsis(value, limit)
 }
+
+pub(super) fn format_age(age: chrono::Duration) -> String {
+    let minutes = age.num_minutes().max(0);
+    if minutes < 60 {
+        format!("{minutes}m")
+    } else if minutes < 60 * 24 {
+        format!("{}h{}m", minutes / 60, minutes % 60)
+    } else {
+        format!("{}d{}h", minutes / (60 * 24), (minutes % (60 * 24)) / 60)
+    }
+}

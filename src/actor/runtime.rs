@@ -240,6 +240,15 @@ impl ActorRuntime {
             .await
             .map_err(actor_runtime_error)
     }
+
+    /// Formatted lines describing unfinished subagent work (see
+    /// [`ActorRegistry::open_work_lines`]). Used by the heartbeat digest.
+    pub async fn open_work_lines(&self) -> ActorResult<Vec<String>> {
+        self.supervisor
+            .ask(OpenWorkLines)
+            .await
+            .map_err(actor_runtime_error)
+    }
 }
 
 fn fallback_actor_runtime() -> &'static tokio::runtime::Runtime {
@@ -445,8 +454,7 @@ impl Message<BuildRequestableDirectory> for ActorSupervisor {
         message: BuildRequestableDirectory,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        self.registry
-            .build_requestable_directory(&message.actor_id)
+        self.registry.build_requestable_directory(&message.actor_id)
     }
 }
 
@@ -907,6 +915,21 @@ impl Message<InstallEventBroadcaster> for ActorSupervisor {
         let (tx, rx) = broadcast::channel(message.capacity.max(16));
         self.registry.events.set_broadcaster(tx);
         Ok(rx)
+    }
+}
+
+#[derive(Debug)]
+struct OpenWorkLines;
+
+impl Message<OpenWorkLines> for ActorSupervisor {
+    type Reply = ActorResult<Vec<String>>;
+
+    async fn handle(
+        &mut self,
+        _message: OpenWorkLines,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        Ok(self.registry.open_work_lines())
     }
 }
 

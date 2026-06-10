@@ -25,7 +25,9 @@ use crate::memory::message_metadata::{
     MessageKind, MessageVisibility, metadata_value as message_metadata_value,
 };
 use crate::scheduler::heartbeat::{Heartbeat, HeartbeatAction, HeartbeatConfig};
-use crate::scheduler::proactive::{ActiveReminder, ProactiveRateLimiter, format_active_reminders};
+use crate::scheduler::proactive::{
+    ActiveReminder, ProactiveOutbox, ProactiveRateLimiter, format_active_reminders,
+};
 use crate::todos::TodoFilter;
 
 const EMISSION_QUEUE_DEPTH: usize = 64;
@@ -89,6 +91,7 @@ pub async fn run(
         return Ok(());
     }
     let mut limiter = ProactiveRateLimiter::from_settings(&settings);
+    let mut outbox = ProactiveOutbox::default();
     let mut interval = tokio::time::interval(Duration::from_secs(
         heartbeat.config().interval_seconds.max(1),
     ));
@@ -96,8 +99,16 @@ pub async fn run(
 
     loop {
         interval.tick().await;
-        if let Err(error) =
-            tick(&agent, &settings, &options, &mut heartbeat, &mut limiter, &handle).await
+        if let Err(error) = tick(
+            &agent,
+            &settings,
+            &options,
+            &mut heartbeat,
+            &mut limiter,
+            &mut outbox,
+            &handle,
+        )
+        .await
         {
             tracing::warn!(error = ?error, "brainstem heartbeat tick failed");
         }
@@ -116,31 +127,66 @@ pub async fn trigger_once(
 ) -> Result<Option<String>> {
     let mut heartbeat = Heartbeat::new(HeartbeatConfig::from_settings(settings));
     let mut limiter = ProactiveRateLimiter::from_settings(settings);
+    let mut outbox = ProactiveOutbox::default();
     let handle = BrainstemHandle::new();
     let mut rx = handle.subscribe();
-    tick(agent, settings, options, &mut heartbeat, &mut limiter, &handle).await?;
+    tick(
+        agent,
+        settings,
+        options,
+        &mut heartbeat,
+        &mut limiter,
+        &mut outbox,
+        &handle,
+    )
+    .await?;
     match rx.try_recv() {
         Ok(BrainstemEmission { message, .. }) => Ok(Some(message)),
         Err(_) => Ok(None),
     }
 }
 
+/// True when this tick can skip the LLM round-trip entirely. A tick is only
+/// idle when there is nothing to act on: no due reminders AND no unfinished
+/// work (subagents mid-task, blocked actors, in-progress/overdue todos).
+/// Before open-work awareness, a Blocked subagent could sit invisible for
+/// days because the gate only looked at reminders.
+fn is_idle_tick(
+    first_tick: bool,
+    use_full_context: bool,
+    reminders: &str,
+    open_work: &str,
+) -> bool {
+    !first_tick && !use_full_context && reminders.trim().is_empty() && open_work.trim().is_empty()
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn tick(
     agent: &Agent,
     settings: &Settings,
     options: &AgentOptions,
     heartbeat: &mut Heartbeat,
     limiter: &mut ProactiveRateLimiter,
+    outbox: &mut ProactiveOutbox,
     handle: &BrainstemHandle,
 ) -> Result<()> {
+    // A previously rate-limited proactive message gets first claim on this
+    // tick's send budget — flushed even when the tick itself goes idle.
+    if let Some(deferred) = outbox.take_ready(limiter) {
+        emit_proactive(handle, limiter, &deferred);
+    }
+
     let prompts = PromptStore::new(&settings.paths.workspace_dir, &settings.paths.config_dir);
     let reminders = active_reminders(settings)?;
-    let prompt = heartbeat.trigger(&prompts, &reminders);
+    let open_work = agent.open_work_digest().await;
+    let prompt = heartbeat.trigger(&prompts, &reminders, &open_work);
 
-    // Idle gate: skip the LLM round-trip on a tick that has no due
-    // reminders, no first-tick / full-context reason. Same gate the
-    // legacy telegram loop used — keeps quiet hours cheap.
-    if !prompt.first_tick && !prompt.use_full_context && reminders.trim().is_empty() {
+    if is_idle_tick(
+        prompt.first_tick,
+        prompt.use_full_context,
+        &reminders,
+        &open_work,
+    ) {
         heartbeat.finish_response(r#"{"action":"idle","message":""}"#, None);
         return Ok(());
     }
@@ -161,22 +207,33 @@ async fn tick(
         .process_background_heartbeat_quiet(&prompt.message, &reminders)
         .await?;
 
-    if outcome.action == HeartbeatAction::Send && limiter.allowed() {
+    if outcome.action == HeartbeatAction::Send {
         let trimmed = outcome.message.trim();
         if !trimmed.is_empty() {
-            let emission = BrainstemEmission {
-                kind: BrainstemEmissionKind::Proactive,
-                message: trimmed.to_string(),
-            };
-            // `send` only fails when there are no live subscribers,
-            // which is fine — brainstem still ran its tick (memory was
-            // updated); the message just wouldn't have anywhere to go.
-            if handle.sender.send(emission).is_ok() {
-                limiter.record();
+            if limiter.allowed() {
+                emit_proactive(handle, limiter, trimmed);
+            } else {
+                // Rate-limited, not silenced: hold the message for a later
+                // tick instead of discarding the heartbeat's judgement.
+                tracing::info!("proactive send rate-limited — deferring to outbox");
+                outbox.defer(trimmed);
             }
         }
     }
     Ok(())
+}
+
+fn emit_proactive(handle: &BrainstemHandle, limiter: &mut ProactiveRateLimiter, message: &str) {
+    let emission = BrainstemEmission {
+        kind: BrainstemEmissionKind::Proactive,
+        message: message.to_string(),
+    };
+    // `send` only fails when there are no live subscribers, which is fine —
+    // brainstem still ran its tick (memory was updated); the message just
+    // wouldn't have anywhere to go.
+    if handle.sender.send(emission).is_ok() {
+        limiter.record();
+    }
 }
 
 fn active_reminders(settings: &Settings) -> Result<String> {
@@ -195,4 +252,31 @@ fn active_reminders(settings: &Settings) -> Result<String> {
         })
         .collect::<Vec<_>>();
     Ok(format_active_reminders(&reminders, 10))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn idle_gate_yields_to_open_work() {
+        // The historical behavior: nothing due, not first tick → skip.
+        assert!(is_idle_tick(false, false, "", ""));
+        assert!(is_idle_tick(false, false, "  \n", "  "));
+
+        // Any unfinished work defeats the gate, even with no reminders.
+        // This is the fix for Blocked subagents sitting invisible for days.
+        assert!(!is_idle_tick(
+            false,
+            false,
+            "",
+            "- subagent 'researcher' (task=blocked) — BLOCKED, needs attention"
+        ));
+        assert!(!is_idle_tick(false, false, "", "- todo #3 [in_progress]"));
+
+        // Reminders, first tick, and the deep review still defeat it too.
+        assert!(!is_idle_tick(false, false, "- [high] Submit report", ""));
+        assert!(!is_idle_tick(true, false, "", ""));
+        assert!(!is_idle_tick(false, true, "", ""));
+    }
 }

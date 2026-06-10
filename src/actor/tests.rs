@@ -24,7 +24,10 @@ fn unknown_user_notify_kind_defaults_to_info() {
         MessageIntent::Info
     );
     // Strict parse: exact aliases match, compound/unknown strings default to Info.
-    assert_eq!(MessageIntent::from_strings("", "warning"), MessageIntent::Alert);
+    assert_eq!(
+        MessageIntent::from_strings("", "warning"),
+        MessageIntent::Alert
+    );
     assert_eq!(
         MessageIntent::from_strings("", "deadline"),
         MessageIntent::Reminder
@@ -70,6 +73,215 @@ fn registry_with_principal_and_worker() -> (ActorRegistry, String, String) {
 }
 
 #[test]
+fn open_work_lines_surface_unfinished_subagents_only() {
+    let (mut registry, principal, worker) = registry_with_principal_and_worker();
+
+    // The DMN housekeeping actor and the principal never count as open work.
+    let mut dmn_config = ActorConfig::new(
+        crate::actor::background::DMN_ACTOR_NAME,
+        "Background reflection",
+    )
+    .in_group("main");
+    dmn_config.persistent = true;
+    registry.spawn(dmn_config, Some(&principal), false);
+
+    // A second subagent that gets blocked mid-task.
+    let blocked = registry.spawn(
+        ActorConfig::new("deployer", "Deploy the release").in_group("main"),
+        Some(&principal),
+        false,
+    );
+    registry
+        .set_task_state(&blocked, "blocked", "waiting for the API key from the user")
+        .unwrap();
+
+    let lines = registry.open_work_lines();
+    let joined = lines.join("\n");
+    assert_eq!(
+        lines.len(),
+        2,
+        "principal and dmn must be excluded: {joined}"
+    );
+    assert!(joined.contains("researcher"));
+    assert!(joined.contains("deployer"));
+    assert!(joined.contains("BLOCKED, needs attention"));
+    assert!(joined.contains("waiting for the API key"));
+    assert!(joined.contains("turns 0/5"));
+    assert!(!joined.contains("cortex"));
+    assert!(!joined.contains("'dmn'"));
+
+    // Terminated actors drop out of the digest.
+    registry
+        .terminate(&worker, Outcome::Success, "done")
+        .unwrap();
+    registry
+        .terminate(&blocked, Outcome::Failure, "gave up")
+        .unwrap();
+    assert!(registry.open_work_lines().is_empty());
+}
+
+#[test]
+fn subagent_sees_its_previous_turn_in_next_prompt() {
+    let (mut registry, _principal, worker) = registry_with_principal_and_worker();
+
+    // First turn: fresh prompt, no previous-turn block.
+    let prompt = registry.build_system_prompt(&worker).unwrap();
+    assert!(!prompt.contains("<your_previous_turn>"));
+
+    registry
+        .record_actor_turn_response(
+            &worker,
+            "GOAL: survey crates. DONE: found 3 candidates. NEXT: benchmark serde_v2.",
+        )
+        .unwrap();
+
+    // Next turn: the actor's own checkpoint is in its prompt — subagent turns
+    // are no longer memoryless between iterations.
+    let prompt = registry.build_system_prompt(&worker).unwrap();
+    assert!(prompt.contains("<your_previous_turn>"));
+    assert!(prompt.contains("benchmark serde_v2"));
+
+    // The principal never gets the block (its continuity is conversation history).
+    let principal_prompt = registry
+        .build_system_prompt(&registry.get_principal().unwrap().id.clone())
+        .unwrap();
+    assert!(!principal_prompt.contains("<your_previous_turn>"));
+}
+
+#[test]
+fn max_turns_termination_hands_checkpoint_to_parent() {
+    let (mut registry, principal, worker) = registry_with_principal_and_worker();
+
+    registry
+        .set_task_state(&worker, "running", "step 3 of 5: porting the lexer")
+        .unwrap();
+
+    // Burn through the worker's 5-turn budget, leaving a checkpoint each turn.
+    for turn in 1..=5 {
+        let spec = registry.prepare_actor_turn(&worker).unwrap();
+        assert!(spec.is_some(), "turn {turn} should be allowed");
+        registry
+            .record_actor_turn_response(&worker, format!("checkpoint after turn {turn}"))
+            .unwrap();
+    }
+
+    // Turn 6 hits the cap: actor terminates with a handoff, not a bare notice.
+    assert!(registry.prepare_actor_turn(&worker).unwrap().is_none());
+    let actor = registry.get(&worker).unwrap();
+    assert_eq!(actor.state, ActorState::Terminated);
+    assert_eq!(actor.info().outcome, Some(Outcome::MaxTurns));
+    let result = actor.result().unwrap();
+    assert!(result.contains("Max turns reached (5)"));
+    assert!(result.contains("porting the lexer"));
+    assert!(result.contains("checkpoint after turn 5"));
+    assert!(result.contains("spawn a successor"));
+
+    // The parent's inbox received the same handoff via termination notify.
+    let parent_message = registry.pop_inbox(&principal).unwrap();
+    assert_eq!(parent_message.sender, worker);
+    assert!(parent_message.intent.is_terminal());
+    assert!(parent_message.content.contains("checkpoint after turn 5"));
+}
+
+#[test]
+fn actor_state_survives_simulated_process_restart() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store_path = tmp.path().join("actors.db");
+
+    // === Process 1: spawn a subagent, make progress, then "crash". ===
+    let worker_id;
+    {
+        let mut registry = ActorRegistry::new();
+        registry.set_store(ActorStore::open(&store_path).unwrap());
+        let principal = registry.spawn(
+            ActorConfig::new("cortex", "Serve the user").in_group("main"),
+            None,
+            true,
+        );
+        let mut config = ActorConfig::new("migrator", "Port the legacy importer to the new API")
+            .in_group("main");
+        config.max_turns = 30;
+        config.tools = vec!["read_file".to_string(), "bash".to_string()];
+        worker_id = registry.spawn(config, Some(&principal), false);
+
+        // Two turns of work with a checkpoint and a task-state note.
+        registry.prepare_actor_turn(&worker_id).unwrap().unwrap();
+        registry
+            .record_actor_turn_response(
+                &worker_id,
+                "DONE: mapped 14 endpoints. NEXT: write the adapter for /v2/items.",
+            )
+            .unwrap();
+        registry.prepare_actor_turn(&worker_id).unwrap().unwrap();
+        registry
+            .record_actor_turn_response(
+                &worker_id,
+                "DONE: adapter drafted. NEXT: run the integration tests.",
+            )
+            .unwrap();
+        registry
+            .set_task_state(&worker_id, "running", "adapter drafted, tests pending")
+            .unwrap();
+        // Registry dropped here — the old process is gone.
+    }
+
+    // === Process 2: fresh registry, same store. ===
+    let mut registry = ActorRegistry::new();
+    registry.set_store(ActorStore::open(&store_path).unwrap());
+    let new_principal = registry.spawn(
+        ActorConfig::new("cortex", "Serve the user").in_group("main"),
+        None,
+        true,
+    );
+    assert_eq!(registry.restore_unfinished(&new_principal), 1);
+
+    let restored = registry
+        .get(&worker_id)
+        .expect("worker restored with same id");
+    assert_eq!(restored.config.name, "migrator");
+    assert_eq!(
+        restored.config.goals,
+        "Port the legacy importer to the new API"
+    );
+    assert_eq!(restored.turn_count(), 2, "turn budget consumption survives");
+    assert_eq!(restored.task_state_note(), "adapter drafted, tests pending");
+    assert_eq!(restored.state, ActorState::Waiting);
+    // Re-parented to the live principal: the old one no longer exists.
+    assert_eq!(restored.spawned_by, new_principal);
+    // The restart notice is queued, so the actor's next turn knows what happened…
+    assert!(restored.has_pending_messages());
+    // …and the supervisor will autocontinue it (Waiting + Running + turns left).
+    assert!(registry.should_autocontinue_actor(&worker_id));
+
+    // Its next-turn prompt carries the pre-crash checkpoint AND the notice.
+    let prompt = registry.build_system_prompt(&worker_id).unwrap();
+    assert!(prompt.contains("<your_previous_turn>"));
+    assert!(prompt.contains("run the integration tests"));
+    assert!(prompt.contains("host process restarted"));
+
+    // The restored actor shows up as open work for the heartbeat.
+    let open_work = registry.open_work_lines().join("\n");
+    assert!(open_work.contains("migrator"));
+    assert!(open_work.contains("adapter drafted"));
+
+    // Restore is idempotent: running it again must not duplicate actors.
+    assert_eq!(registry.restore_unfinished(&new_principal), 0);
+
+    // Terminating the worker updates the store: nothing left to restore.
+    registry
+        .terminate(&worker_id, Outcome::Success, "migration complete")
+        .unwrap();
+    let mut registry3 = ActorRegistry::new();
+    registry3.set_store(ActorStore::open(&store_path).unwrap());
+    let principal3 = registry3.spawn(
+        ActorConfig::new("cortex", "Serve the user").in_group("main"),
+        None,
+        true,
+    );
+    assert_eq!(registry3.restore_unfinished(&principal3), 0);
+}
+
+#[test]
 fn registry_spawns_discovers_and_cleans_terminated_actors() {
     let (mut registry, principal, worker) = registry_with_principal_and_worker();
 
@@ -91,7 +303,11 @@ fn registry_spawns_discovers_and_cleans_terminated_actors() {
             .is_empty()
     );
 
-    assert!(registry.terminate(&worker, Outcome::Success, "done").unwrap());
+    assert!(
+        registry
+            .terminate(&worker, Outcome::Success, "done")
+            .unwrap()
+    );
     assert_eq!(registry.active_count(), 1);
     assert_eq!(registry.discover("main").len(), 2);
     assert_eq!(registry.discover_active("main").len(), 1);
@@ -328,9 +544,7 @@ fn actor_tool_methods_kill_terminate_restart_and_finished_listing() {
     let terminate =
         registry.terminate_tool(&worker, "All done", "partial", "src/lib.rs", "run tests");
     assert!(terminate.contains("Terminated"));
-    let finished = registry
-        .discover_for_actor(&principal, None, true)
-        .unwrap();
+    let finished = registry.discover_for_actor(&principal, None, true).unwrap();
     assert!(finished.contains("researcher"));
     assert!(finished.contains("[outcome: partial]"));
     assert!(finished.contains("[files: src/lib.rs]"));

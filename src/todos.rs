@@ -107,6 +107,9 @@ pub struct Todo {
     pub remind_count: i64,
     pub tags: Vec<String>,
     pub source: Option<String>,
+    /// Parent todo for subtasks. Lets a multi-step plan live as one tree
+    /// instead of disconnected flat rows.
+    pub parent_id: Option<i64>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -117,6 +120,7 @@ pub struct NewTodo {
     pub due_date: Option<String>,
     pub tags: Vec<String>,
     pub source: Option<String>,
+    pub parent_id: Option<i64>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -134,6 +138,7 @@ pub struct TodoUpdate {
     pub status: Option<TodoStatus>,
     pub priority: Option<TodoPriority>,
     pub due_date: Option<String>,
+    pub parent_id: Option<i64>,
 }
 
 #[derive(Debug, Error)]
@@ -180,8 +185,8 @@ impl TodoManager {
         };
         let conn = self.conn()?;
         conn.execute(
-            "INSERT INTO todos (title, description, priority, due_date, tags, source, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            "INSERT INTO todos (title, description, priority, due_date, tags, source, created_at, updated_at, parent_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 todo.title.trim(),
                 empty_to_none(todo.description.as_deref()),
@@ -191,6 +196,7 @@ impl TodoManager {
                 empty_to_none(todo.source.as_deref()),
                 now,
                 now,
+                todo.parent_id,
             ],
         )?;
         Ok(conn.last_insert_rowid())
@@ -255,6 +261,10 @@ impl TodoManager {
             todo.due_date = empty_to_none(Some(&due_date)).map(str::to_string);
             changed = true;
         }
+        if let Some(parent_id) = update.parent_id {
+            todo.parent_id = (parent_id > 0).then_some(parent_id);
+            changed = true;
+        }
         if !changed {
             return Ok(false);
         }
@@ -264,8 +274,8 @@ impl TodoManager {
         let updated = conn.execute(
             "UPDATE todos
              SET title = ?1, description = ?2, status = ?3, priority = ?4, updated_at = ?5,
-                 completed_at = ?6, due_date = ?7
-             WHERE id = ?8",
+                 completed_at = ?6, due_date = ?7, parent_id = ?8
+             WHERE id = ?9",
             params![
                 todo.title,
                 todo.description,
@@ -274,10 +284,19 @@ impl TodoManager {
                 todo.updated_at,
                 todo.completed_at,
                 todo.due_date,
+                todo.parent_id,
                 todo_id,
             ],
         )?;
         Ok(updated > 0)
+    }
+
+    /// Active (non-completed, non-cancelled) children of a todo.
+    pub fn subtasks(&self, parent_id: i64) -> TodoResult<Vec<Todo>> {
+        let mut todos = self.all()?;
+        todos.retain(|todo| todo.parent_id == Some(parent_id) && todo.status.active());
+        todos.sort_by(compare_todos);
+        Ok(todos)
     }
 
     pub fn complete(&self, todo_id: i64) -> TodoResult<bool> {
@@ -334,6 +353,54 @@ impl TodoManager {
         Ok(due)
     }
 
+    /// Compact digest of work the agent is on the hook for: every
+    /// `in_progress` todo plus anything past its due date. Empty string when
+    /// nothing qualifies. Injected into the system prompt and the heartbeat
+    /// so unfinished work stays visible without a tool call.
+    pub fn open_work_digest(&self, limit: usize) -> TodoResult<String> {
+        self.open_work_digest_at(Utc::now(), limit)
+    }
+
+    pub fn open_work_digest_at(&self, now: DateTime<Utc>, limit: usize) -> TodoResult<String> {
+        let todos = self.list(TodoFilter {
+            include_completed: false,
+            limit: usize::MAX,
+            ..Default::default()
+        })?;
+        let mut lines = Vec::new();
+        for todo in &todos {
+            let overdue = todo
+                .due_date
+                .as_deref()
+                .and_then(parse_due_date)
+                .is_some_and(|due| due < now);
+            if todo.status != TodoStatus::InProgress && !overdue {
+                continue;
+            }
+            let due = todo
+                .due_date
+                .as_deref()
+                .map(|due| format!(" (due: {due})"))
+                .unwrap_or_default();
+            let overdue_marker = if overdue { " — OVERDUE" } else { "" };
+            let subtask = todo
+                .parent_id
+                .map(|parent| format!(" [subtask of #{parent}]"))
+                .unwrap_or_default();
+            lines.push(format!(
+                "- todo #{} [{}] ({}) {}{due}{overdue_marker}{subtask}",
+                todo.id,
+                todo.status.as_str(),
+                todo.priority.as_str(),
+                todo.title,
+            ));
+            if lines.len() >= limit.max(1) {
+                break;
+            }
+        }
+        Ok(lines.join("\n"))
+    }
+
     pub fn search(&self, query: &str, limit: usize) -> TodoResult<Vec<Todo>> {
         let needle = query.to_ascii_lowercase();
         let mut todos = self.list(TodoFilter {
@@ -371,6 +438,9 @@ impl TodoManager {
             todo.priority.as_str(),
             todo.title
         )];
+        if let Some(parent) = todo.parent_id {
+            lines.push(format!("subtask of: #{parent}"));
+        }
         if let Some(due) = todo.due_date.as_deref() {
             lines.push(format!("due: {due}"));
         }
@@ -430,9 +500,13 @@ impl TodoManager {
             } else {
                 String::new()
             };
+            let subtask = todo
+                .parent_id
+                .map(|parent| format!(" [subtask of #{parent}]"))
+                .unwrap_or_default();
             lines.push(format!(
-                "{status_icon} #{} {priority_icon}{}{}{}",
-                todo.id, todo.title, due, reminded
+                "{status_icon} #{} {priority_icon}{}{}{}{}",
+                todo.id, todo.title, due, reminded, subtask
             ));
             if let Some(description) = todo.description.as_deref() {
                 lines.push(format!(
@@ -502,9 +576,17 @@ impl TodoManager {
                 last_reminded_at TEXT,
                 remind_count INTEGER DEFAULT 0,
                 tags TEXT,
-                source TEXT
+                source TEXT,
+                parent_id INTEGER
             );",
         )?;
+        // Migration for databases created before subtasks existed.
+        let has_parent_id = conn
+            .prepare("SELECT 1 FROM pragma_table_info('todos') WHERE name = 'parent_id'")?
+            .exists([])?;
+        if !has_parent_id {
+            conn.execute("ALTER TABLE todos ADD COLUMN parent_id INTEGER", [])?;
+        }
         Ok(())
     }
 
@@ -541,7 +623,23 @@ fn row_to_todo(row: &rusqlite::Row<'_>) -> rusqlite::Result<Todo> {
             .and_then(|value| serde_json::from_str(value).ok())
             .unwrap_or_default(),
         source: row.get("source")?,
+        parent_id: row.get("parent_id")?,
     })
+}
+
+/// Parse a due date stored as free text. Accepts RFC3339 or a plain
+/// `YYYY-MM-DD` prefix (treated as end-of-day UTC). Anything else is not
+/// considered for overdue detection.
+fn parse_due_date(due: &str) -> Option<DateTime<Utc>> {
+    let trimmed = due.trim();
+    if let Ok(parsed) = DateTime::parse_from_rfc3339(trimmed) {
+        return Some(parsed.with_timezone(&Utc));
+    }
+    let date = chrono::NaiveDate::parse_from_str(trimmed.get(..10)?, "%Y-%m-%d").ok()?;
+    Some(DateTime::from_naive_utc_and_offset(
+        date.and_hms_opt(23, 59, 59)?,
+        Utc,
+    ))
 }
 
 fn compare_todos(left: &Todo, right: &Todo) -> Ordering {
@@ -583,7 +681,7 @@ fn _path_exists(path: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use chrono::Duration;
+    use chrono::{Duration, TimeZone};
     use tempfile::tempdir;
 
     use super::*;
@@ -614,6 +712,7 @@ mod tests {
                 due_date: Some("2026-05-23".to_string()),
                 tags: vec!["work".to_string()],
                 source: Some("test".to_string()),
+                parent_id: None,
             })
             .unwrap();
 
@@ -725,6 +824,156 @@ mod tests {
         let due_after_eight_days = manager.due_reminders_at(now + Duration::days(8)).unwrap();
         assert_eq!(due_after_eight_days.len(), 2);
         assert!(TodoManager::format_due_reminders(&due_after_eight_days).contains("urgent"));
+    }
+
+    #[test]
+    fn subtasks_link_to_parent_and_round_trip() {
+        let manager = manager();
+        let parent = manager
+            .create(NewTodo {
+                title: "migrate the database".to_string(),
+                priority: TodoPriority::High,
+                ..Default::default()
+            })
+            .unwrap();
+        let child = manager
+            .create(NewTodo {
+                title: "write schema migration".to_string(),
+                parent_id: Some(parent),
+                ..Default::default()
+            })
+            .unwrap();
+        let orphan = manager
+            .create(NewTodo {
+                title: "unrelated".to_string(),
+                ..Default::default()
+            })
+            .unwrap();
+
+        assert_eq!(manager.get(child).unwrap().unwrap().parent_id, Some(parent));
+        let children = manager.subtasks(parent).unwrap();
+        assert_eq!(children.len(), 1);
+        assert_eq!(children[0].id, child);
+
+        // Re-parenting via update, and detail/list formatting carry the link.
+        assert!(
+            manager
+                .update(
+                    orphan,
+                    TodoUpdate {
+                        parent_id: Some(parent),
+                        ..Default::default()
+                    },
+                )
+                .unwrap()
+        );
+        assert_eq!(manager.subtasks(parent).unwrap().len(), 2);
+        let detail = TodoManager::format_detail(&manager.get(child).unwrap().unwrap());
+        assert!(detail.contains(&format!("subtask of: #{parent}")));
+        // Completed subtasks drop out of the active subtask view.
+        manager.complete(child).unwrap();
+        assert_eq!(manager.subtasks(parent).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn pre_subtask_databases_are_migrated_in_place() {
+        let tmp = tempdir().unwrap();
+        let path = tmp.path().join("todos.sqlite");
+        // Simulate a database created before the parent_id column existed.
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE todos (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                title TEXT NOT NULL,
+                description TEXT,
+                status TEXT DEFAULT 'pending',
+                priority TEXT DEFAULT 'normal',
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                completed_at TEXT,
+                due_date TEXT,
+                last_reminded_at TEXT,
+                remind_count INTEGER DEFAULT 0,
+                tags TEXT,
+                source TEXT
+            );
+            INSERT INTO todos (title) VALUES ('legacy row');",
+        )
+        .unwrap();
+        drop(conn);
+
+        let manager = TodoManager::open(&path).unwrap();
+        let todos = manager.list(TodoFilter::default()).unwrap();
+        assert_eq!(todos.len(), 1);
+        assert_eq!(todos[0].parent_id, None);
+        // And the migrated schema accepts subtasks.
+        let child = manager
+            .create(NewTodo {
+                title: "new subtask".to_string(),
+                parent_id: Some(todos[0].id),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(
+            manager.get(child).unwrap().unwrap().parent_id,
+            Some(todos[0].id)
+        );
+    }
+
+    #[test]
+    fn open_work_digest_surfaces_in_progress_and_overdue() {
+        let manager = manager();
+        let in_progress = manager
+            .create(NewTodo {
+                title: "port the parser".to_string(),
+                priority: TodoPriority::High,
+                ..Default::default()
+            })
+            .unwrap();
+        manager
+            .update(
+                in_progress,
+                TodoUpdate {
+                    status: Some(TodoStatus::InProgress),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        manager
+            .create(NewTodo {
+                title: "renew permit".to_string(),
+                due_date: Some("2026-01-15".to_string()),
+                ..Default::default()
+            })
+            .unwrap();
+        manager
+            .create(NewTodo {
+                title: "future thing".to_string(),
+                due_date: Some("2099-01-01".to_string()),
+                ..Default::default()
+            })
+            .unwrap();
+        manager
+            .create(NewTodo {
+                title: "plain pending".to_string(),
+                ..Default::default()
+            })
+            .unwrap();
+
+        let now = Utc.with_ymd_and_hms(2026, 6, 10, 12, 0, 0).unwrap();
+        let digest = manager.open_work_digest_at(now, 10).unwrap();
+        assert!(digest.contains("port the parser"));
+        assert!(digest.contains("[in_progress]"));
+        assert!(digest.contains("renew permit"));
+        assert!(digest.contains("OVERDUE"));
+        // Not yet due and not started — stays out of the digest.
+        assert!(!digest.contains("future thing"));
+        assert!(!digest.contains("plain pending"));
+
+        // Empty digest when nothing is open.
+        let tmp = tempdir().unwrap();
+        let empty = TodoManager::open(tmp.path().join("e.sqlite")).unwrap();
+        assert_eq!(empty.open_work_digest_at(now, 10).unwrap(), "");
     }
 
     #[test]

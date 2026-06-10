@@ -97,11 +97,17 @@ impl Heartbeat {
         self.idle_minutes_accum = 0;
     }
 
-    pub fn trigger(&mut self, prompts: &PromptStore, reminders: &str) -> HeartbeatPrompt {
+    pub fn trigger(
+        &mut self,
+        prompts: &PromptStore,
+        reminders: &str,
+        open_work: &str,
+    ) -> HeartbeatPrompt {
         let now = Local::now();
         self.trigger_at(
             prompts,
             reminders,
+            open_work,
             now.with_timezone(&Utc),
             &now.format("%Y-%m-%d %H:%M %Z").to_string(),
         )
@@ -111,6 +117,7 @@ impl Heartbeat {
         &mut self,
         prompts: &PromptStore,
         reminders: &str,
+        open_work: &str,
         now_utc: DateTime<Utc>,
         timestamp: &str,
     ) -> HeartbeatPrompt {
@@ -123,16 +130,17 @@ impl Heartbeat {
         let mut variables = HashMap::new();
         variables.insert("timestamp".to_string(), timestamp.to_string());
         variables.insert("reminders".to_string(), format_reminder_block(reminders));
+        variables.insert("open_work".to_string(), format_open_work_block(open_work));
 
         let (name, fallback) = if use_full_context {
             (
                 "heartbeat_message_full",
-                "[System: heartbeat - {timestamp}]\n\n{reminders}\nFull review. Respond with typed JSON only.",
+                "[System: heartbeat - {timestamp}]\n\n{reminders}{open_work}\nFull review. Respond with typed JSON only.",
             )
         } else {
             (
                 "heartbeat_message",
-                "[System: heartbeat - {timestamp}]\n\n{reminders}\nRespond with typed JSON only.",
+                "[System: heartbeat - {timestamp}]\n\n{reminders}{open_work}\nRespond with typed JSON only.",
             )
         };
         let message = prompts.render(name, &variables, fallback).text;
@@ -367,6 +375,19 @@ fn format_reminder_block(reminders: &str) -> String {
     }
 }
 
+fn format_open_work_block(open_work: &str) -> String {
+    let open_work = open_work.trim();
+    if open_work.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "Open work — unfinished subagents and in-progress/overdue todos. \
+             Anything BLOCKED or stalled here needs a decision from you \
+             (unblock it, message the subagent, escalate, or close it out):\n{open_work}\n\n"
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use chrono::TimeZone;
@@ -387,6 +408,7 @@ mod tests {
         let prompt = heartbeat.trigger_at(
             &prompts,
             "- [high] Submit report",
+            "",
             Utc.with_ymd_and_hms(2026, 5, 22, 12, 0, 0).unwrap(),
             "2026-05-22 14:00 CEST",
         );
@@ -397,6 +419,46 @@ mod tests {
         assert!(prompt.message.contains("Active reminders:"));
         assert!(prompt.message.contains("Submit report"));
         assert!(prompt.message.contains("deeper check-in"));
+        // No open work — the block (and its leftover placeholder) is absent.
+        assert!(!prompt.message.contains("Open work"));
+        assert!(!prompt.message.contains("{open_work}"));
+    }
+
+    #[test]
+    fn trigger_renders_open_work_block_with_unfinished_items() {
+        let (_tmp, prompts) = prompts();
+        let mut heartbeat = Heartbeat::new(HeartbeatConfig::default());
+        let open_work = "- subagent 'researcher' (id=abc, state=waiting, task=blocked, turns 5/20, age 3h2m) — BLOCKED, needs attention: waiting for API key\n- todo #7 [in_progress] (high) port the parser";
+        let prompt = heartbeat.trigger_at(
+            &prompts,
+            "",
+            open_work,
+            Utc.with_ymd_and_hms(2026, 5, 22, 12, 0, 0).unwrap(),
+            "2026-05-22 14:00 CEST",
+        );
+
+        // First tick renders the full-context template.
+        assert!(prompt.use_full_context);
+        assert!(prompt.message.contains("Open work"));
+        assert!(prompt.message.contains("BLOCKED, needs attention"));
+        assert!(prompt.message.contains("port the parser"));
+        assert!(prompt.message.contains("resumes itself"));
+        heartbeat.finish_response("ok", None);
+
+        // Second tick (within the full-context interval) renders the minimal
+        // template — open work must survive there too.
+        let prompt = heartbeat.trigger_at(
+            &prompts,
+            "",
+            open_work,
+            Utc.with_ymd_and_hms(2026, 5, 22, 13, 0, 0).unwrap(),
+            "2026-05-22 15:00 CEST",
+        );
+        assert!(!prompt.use_full_context);
+        assert!(prompt.message.contains("Open work"));
+        assert!(prompt.message.contains("BLOCKED, needs attention"));
+        assert!(prompt.message.contains("resume itself"));
+        assert!(!prompt.message.contains("{open_work}"));
     }
 
     #[test]
@@ -411,19 +473,31 @@ mod tests {
 
         assert!(
             heartbeat
-                .trigger_at(&prompts, "", start, "first")
+                .trigger_at(&prompts, "", "", start, "first")
                 .use_full_context
         );
         heartbeat.finish_response("ok", None);
         assert!(
             !heartbeat
-                .trigger_at(&prompts, "", start + chrono::Duration::hours(1), "second")
+                .trigger_at(
+                    &prompts,
+                    "",
+                    "",
+                    start + chrono::Duration::hours(1),
+                    "second"
+                )
                 .use_full_context
         );
         heartbeat.finish_response("ok", None);
         assert!(
             heartbeat
-                .trigger_at(&prompts, "", start + chrono::Duration::hours(2), "third")
+                .trigger_at(
+                    &prompts,
+                    "",
+                    "",
+                    start + chrono::Duration::hours(2),
+                    "third"
+                )
                 .use_full_context
         );
     }

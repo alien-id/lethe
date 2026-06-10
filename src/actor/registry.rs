@@ -21,6 +21,9 @@ pub struct ActorRegistry {
     pub(super) actors: HashMap<String, Actor>,
     principal_id: Option<String>,
     pub events: ActorEventBus,
+    /// Optional SQLite write-through. When set, every actor mutation is
+    /// snapshotted so unfinished work survives a process restart.
+    store: Option<crate::actor::persistence::ActorStore>,
 }
 
 impl ActorRegistry {
@@ -31,6 +34,21 @@ impl ActorRegistry {
             actors: HashMap::new(),
             principal_id: None,
             events: ActorEventBus::new(1000),
+            store: None,
+        }
+    }
+
+    pub fn set_store(&mut self, store: crate::actor::persistence::ActorStore) {
+        self.store = Some(store);
+    }
+
+    /// Best-effort write-through after a mutation. Persistence failures are
+    /// logged and never block agent work.
+    fn persist_actor(&self, actor_id: &str) {
+        if let (Some(store), Some(actor)) = (&self.store, self.actors.get(actor_id))
+            && let Err(error) = store.persist(actor)
+        {
+            tracing::warn!(actor_id, error = %error, "actor persistence failed");
         }
     }
 
@@ -57,7 +75,90 @@ impl ActorRegistry {
             }),
         );
         self.actors.insert(actor_id.clone(), actor);
+        self.persist_actor(&actor_id);
         actor_id
+    }
+
+    /// Rehydrate unfinished subagents persisted by a previous process run.
+    /// Call once at startup, after spawning the fresh principal. Each
+    /// restored actor keeps its id, goals, task state, turn count, and last
+    /// end-of-turn checkpoint; actors whose parent no longer exists are
+    /// re-parented to `fallback_parent`. A synthetic inbox notice tells the
+    /// actor it was interrupted so its next turn starts informed. Returns the
+    /// number of actors restored.
+    pub fn restore_unfinished(&mut self, fallback_parent: &str) -> usize {
+        let Some(store) = &self.store else {
+            return 0;
+        };
+        let restored = match store.load_unfinished() {
+            Ok(restored) => restored,
+            Err(error) => {
+                tracing::warn!(error = %error, "actor restore failed");
+                return 0;
+            }
+        };
+        let restored_ids = restored
+            .iter()
+            .map(|entry| entry.actor.id.clone())
+            .collect::<std::collections::HashSet<_>>();
+
+        let mut count = 0;
+        for entry in restored {
+            let mut actor = entry.actor;
+            if self.actors.contains_key(&actor.id) {
+                continue;
+            }
+            // Re-parent orphans (e.g. children of the previous run's
+            // principal) to the live principal so messaging permissions and
+            // termination notifications keep working.
+            if !self.actors.contains_key(&actor.spawned_by)
+                && !restored_ids.contains(&actor.spawned_by)
+            {
+                actor.spawned_by = fallback_parent.to_string();
+            }
+            // Carry the last checkpoint across the restart as a self-message
+            // so <your_previous_turn> renders on the actor's next turn.
+            if let Some(last_response) = entry
+                .last_response
+                .as_deref()
+                .filter(|text| !text.trim().is_empty())
+            {
+                actor.messages.push(ActorMessage::new(
+                    actor.id.clone(),
+                    actor.id.clone(),
+                    last_response,
+                    MessageIntent::Info,
+                ));
+            }
+            let notice = ActorMessage::new(
+                fallback_parent,
+                actor.id.clone(),
+                "[System] The host process restarted while you were working. Your goals, \
+                 task state, and last checkpoint were restored; the rest of your in-memory \
+                 context was lost. Review them, then continue the task or terminate with a result.",
+                MessageIntent::Message,
+            );
+            actor.messages.push(notice.clone());
+            actor.inbox.push_back(notice);
+
+            self.emit_event(
+                "actor_restored",
+                &actor,
+                json!({
+                    "name": actor.config.name,
+                    "task_state": state_name(actor.task_state),
+                    "turns_used": actor.turn_count,
+                }),
+            );
+            let actor_id = actor.id.clone();
+            self.actors.insert(actor_id.clone(), actor);
+            self.persist_actor(&actor_id);
+            count += 1;
+        }
+        if count > 0 {
+            tracing::info!(count, "restored unfinished subagents from previous run");
+        }
+        count
     }
 
     pub fn get(&self, actor_id: &str) -> Option<&Actor> {
@@ -287,6 +388,7 @@ impl ActorRegistry {
                 "note": snapshot.task_state_note,
             }),
         );
+        self.persist_actor(actor_id);
         Ok(format!(
             "Task state updated: {} -> {}",
             state_name(previous),
@@ -343,6 +445,7 @@ impl ActorRegistry {
                 "turns": actor.turn_count,
             }),
         );
+        self.persist_actor(actor_id);
         Ok(true)
     }
 
@@ -393,6 +496,7 @@ impl ActorRegistry {
                 "turns": actor.turn_count,
             }),
         );
+        self.persist_actor(actor_id);
         Ok(false)
     }
 
@@ -461,14 +565,12 @@ impl ActorRegistry {
             return Ok(None);
         }
         if actor.turn_count >= actor.config.max_turns.max(1) {
-            self.terminate(
-                actor_id,
-                Outcome::MaxTurns,
-                format!(
-                    "Max turns reached ({}) before completing task.",
-                    actor.config.max_turns.max(1)
-                ),
-            )?;
+            // Don't terminate empty-handed: the handoff carries the last task
+            // state and the actor's final checkpoint to the parent, so a
+            // successor can be spawned to continue instead of restarting from
+            // zero.
+            let handoff = max_turns_handoff(&actor);
+            self.terminate(actor_id, Outcome::MaxTurns, handoff)?;
             return Ok(None);
         }
 
@@ -496,6 +598,7 @@ impl ActorRegistry {
             has_pending_messages,
             requested_tools: updated.config.tools.clone(),
         };
+        self.persist_actor(actor_id);
         Ok(Some(spec))
     }
 
@@ -525,7 +628,54 @@ impl ActorRegistry {
             });
         }
         actor.state = ActorState::Waiting;
+        self.persist_actor(actor_id);
         Ok(())
+    }
+
+    /// One line per unfinished subagent — anything not terminated, excluding
+    /// the principal and the DMN housekeeping actor. Feeds the heartbeat's
+    /// open-work digest so background work that stalls (especially Blocked
+    /// actors, which never autocontinue) stays visible instead of being
+    /// silently parked forever.
+    pub fn open_work_lines(&self) -> Vec<String> {
+        let now = Utc::now();
+        let mut unfinished = self
+            .actors
+            .values()
+            .filter(|actor| {
+                !actor.is_principal
+                    && actor.state != ActorState::Terminated
+                    && actor.config.name != crate::actor::background::DMN_ACTOR_NAME
+            })
+            .collect::<Vec<_>>();
+        unfinished.sort_by_key(|actor| actor.created_at);
+        unfinished
+            .into_iter()
+            .map(|actor| {
+                let age = format_age(now.signed_duration_since(actor.created_at));
+                let note = if actor.task_state_note.is_empty() {
+                    truncate_chars(&actor.config.goals, 160)
+                } else {
+                    truncate_chars(&actor.task_state_note, 160)
+                };
+                let blocked_marker = if actor.task_state == TaskState::Blocked {
+                    " — BLOCKED, needs attention"
+                } else {
+                    ""
+                };
+                format!(
+                    "- subagent '{}' (id={}, state={}, task={}, turns {}/{}, age {age}){}: {}",
+                    actor.config.name,
+                    actor.id,
+                    actor_state_name(actor.state),
+                    state_name(actor.task_state),
+                    actor.turn_count,
+                    actor.config.max_turns.max(1),
+                    blocked_marker,
+                    note,
+                )
+            })
+            .collect()
     }
 
     pub fn should_autocontinue_actor(&self, actor_id: &str) -> bool {
@@ -573,6 +723,22 @@ impl ActorRegistry {
         // already in the identity_block, so we skip the redundant <goals>.
         if !actor.is_principal {
             builder.block("goals", actor.config.goals.clone());
+        }
+
+        // Subagent turns are otherwise memoryless — each turn rebuilds the
+        // prompt from goals + inbox, so without this block an actor couldn't
+        // see its own prior conclusions (or the checkpoint a cut-short turn
+        // wrote). Surface the last self-recorded response.
+        if !actor.is_principal
+            && let Some(last_own) = last_self_response(actor)
+        {
+            builder.block(
+                "your_previous_turn",
+                format!(
+                    "You wrote this at the end of your previous turn. Continue from it; do not redo finished work:\n{}",
+                    truncate_chars(&last_own.content, 1000)
+                ),
+            );
         }
 
         let mut visible = self.discover_active(&actor.config.group);
@@ -1030,4 +1196,42 @@ impl Default for ActorRegistry {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// The actor's own end-of-turn response (recorded by
+/// `record_actor_turn_response` as a self-addressed message).
+fn last_self_response(actor: &Actor) -> Option<&ActorMessage> {
+    actor
+        .messages
+        .iter()
+        .rev()
+        .find(|message| message.sender == actor.id && message.recipient == actor.id)
+}
+
+/// Termination result for an actor that ran out of turns: last task state +
+/// final checkpoint, so the parent's notification is a handoff rather than a
+/// bare failure notice.
+fn max_turns_handoff(actor: &Actor) -> String {
+    let mut parts = vec![format!(
+        "Max turns reached ({}) before completing task.",
+        actor.config.max_turns.max(1)
+    )];
+    if !actor.task_state_note.is_empty() {
+        parts.push(format!(
+            "Last task state: {} — {}",
+            state_name(actor.task_state),
+            actor.task_state_note
+        ));
+    }
+    if let Some(last_own) = last_self_response(actor) {
+        parts.push(format!(
+            "Last checkpoint:\n{}",
+            truncate_chars(&last_own.content, 1200)
+        ));
+    }
+    parts.push(
+        "To continue this work, spawn a successor with the same goals and the checkpoint above as context."
+            .to_string(),
+    );
+    parts.join("\n")
 }

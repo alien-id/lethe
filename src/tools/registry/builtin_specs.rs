@@ -40,8 +40,9 @@ fn exec_memory_list(registry: &ToolRegistry<'_>, args: &Value) -> String {
         .blocks
         .list_blocks(bool_arg(args, "include_hidden", false))
     {
-        Ok(blocks) => serde_json::to_string_pretty(&blocks)
-            .unwrap_or_else(|error| format!("Error: {error}")),
+        Ok(blocks) => {
+            serde_json::to_string_pretty(&blocks).unwrap_or_else(|error| format!("Error: {error}"))
+        }
         Err(error) => format!("Error: {error}"),
     }
 }
@@ -110,9 +111,9 @@ fn exec_memory_complete(registry: &ToolRegistry<'_>, args: &Value) -> String {
         return "Error: target is required (memory id or note file path).".to_string();
     }
     match registry.memory.complete_memory(&target) {
-        Ok(Some(id)) => format!(
-            "Marked {id} as done. It stays searchable but appears compressed in recall."
-        ),
+        Ok(Some(id)) => {
+            format!("Marked {id} as done. It stays searchable but appears compressed in recall.")
+        }
         Ok(None) => format!("No memory found for target: {target}"),
         Err(error) => format!("Error: {error}"),
     }
@@ -188,6 +189,10 @@ fn exec_todo_create(registry: &ToolRegistry<'_>, args: &Value) -> String {
     use crate::todos::{NewTodo, TodoPriority};
     let priority =
         TodoPriority::parse(&string_arg_default(args, "priority", "normal")).unwrap_or_default();
+    let parent_id = match i64_arg(args, "parent_id", 0) {
+        0 => None,
+        id => Some(id),
+    };
     match registry.memory.todos.create(NewTodo {
         title: string_arg(args, "title"),
         description: nonempty_string(args, "description"),
@@ -195,6 +200,7 @@ fn exec_todo_create(registry: &ToolRegistry<'_>, args: &Value) -> String {
         due_date: nonempty_string(args, "due_date"),
         tags: vec![],
         source: Some("agent_tool".to_string()),
+        parent_id,
     }) {
         Ok(id) => format!("Created todo #{id}"),
         Err(error) => format!("Error: {error}"),
@@ -259,6 +265,10 @@ fn exec_todo_update(registry: &ToolRegistry<'_>, args: &Value) -> String {
             status,
             priority,
             due_date: nonempty_string(args, "due_date"),
+            parent_id: match i64_arg(args, "parent_id", 0) {
+                0 => None,
+                id => Some(id),
+            },
         },
     ) {
         Ok(true) => format!("Updated todo #{todo_id}"),
@@ -365,14 +375,20 @@ pub const TOOL_DEFS: &[ToolDef] = &[
     ToolDef {
         name: "memory_complete",
         description: "Mark an archival entry or note as done. It stays searchable but is rendered as a one-line marker in recall (full text via archival_get / note_search). Use when a thread is resolved.",
-        params: &[p_str_req("target", "Memory id (mem-...) or note file path.")],
+        params: &[p_str_req(
+            "target",
+            "Memory id (mem-...) or note file path.",
+        )],
         category: ToolCategory::Requestable,
         execute: ToolExecutor::Sync(exec_memory_complete),
     },
     ToolDef {
         name: "memory_reopen",
         description: "Clear the done flag on an archival entry or note (inverse of memory_complete).",
-        params: &[p_str_req("target", "Memory id (mem-...) or note file path.")],
+        params: &[p_str_req(
+            "target",
+            "Memory id (mem-...) or note file path.",
+        )],
         category: ToolCategory::Requestable,
         execute: ToolExecutor::Sync(exec_memory_reopen),
     },
@@ -418,12 +434,13 @@ pub const TOOL_DEFS: &[ToolDef] = &[
     },
     ToolDef {
         name: "todo_create",
-        description: "Create a persistent todo.",
+        description: "Create a persistent todo. Use parent_id to add a subtask of a larger todo.",
         params: &[
             p_str_req("title", "Title."),
             p_str("description", "Description."),
             p_enum("priority", "Priority.", TODO_PRIORITY_VALUES),
             p_str("due_date", "Due date."),
+            p_int("parent_id", "Parent todo id (makes this a subtask)."),
         ],
         category: ToolCategory::Requestable,
         execute: ToolExecutor::Sync(exec_todo_create),
@@ -464,6 +481,7 @@ pub const TOOL_DEFS: &[ToolDef] = &[
             p_enum("status", "New status.", TODO_STATUS_VALUES),
             p_enum("priority", "New priority.", TODO_PRIORITY_VALUES),
             p_str("due_date", "New due date."),
+            p_int("parent_id", "Parent todo id (makes this a subtask)."),
         ],
         category: ToolCategory::Requestable,
         execute: ToolExecutor::Sync(exec_todo_update),

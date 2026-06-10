@@ -204,8 +204,7 @@ pub(crate) async fn check() -> Result<()> {
             let preview = reply.trim().lines().next().unwrap_or("").to_string();
             println!(
                 "  [OK]   llm (main) — `{}` ({})",
-                preview,
-                settings.llm.llm_model
+                preview, settings.llm.llm_model
             );
         }
         Err(error) => {
@@ -353,6 +352,7 @@ pub(crate) fn todo_command(command: TodoCommand) -> Result<()> {
                 due_date,
                 tags,
                 source,
+                parent_id: None,
             };
             let todo_id = manager.create(todo)?;
             format!("Created todo #{todo_id}: {title}")
@@ -387,6 +387,7 @@ pub(crate) fn todo_command(command: TodoCommand) -> Result<()> {
                     status: parse_optional_status(status.as_deref())?,
                     priority: parse_optional_priority(priority.as_deref())?,
                     due_date,
+                    parent_id: None,
                 },
             )?;
             if updated {
@@ -472,7 +473,10 @@ pub(crate) async fn heartbeat_command(command: HeartbeatCommand) -> Result<()> {
     match command {
         HeartbeatCommand::Prompt { minimal } => {
             let mut heartbeat = Heartbeat::new(heartbeat_config(&settings, minimal));
-            let prompt = heartbeat.trigger(&prompts, &reminders);
+            // CLI inspection runs without an actor runtime — open work here
+            // is the todo side only.
+            let open_work = open_work_text(&settings)?;
+            let prompt = heartbeat.trigger(&prompts, &reminders, &open_work);
             println!("{}", prompt.message);
         }
         HeartbeatCommand::Trigger {
@@ -481,8 +485,9 @@ pub(crate) async fn heartbeat_command(command: HeartbeatCommand) -> Result<()> {
             no_recall,
         } => {
             let mut heartbeat = Heartbeat::new(heartbeat_config(&settings, minimal));
-            let prompt = heartbeat.trigger(&prompts, &reminders);
             let agent = Agent::from_settings(settings.clone())?;
+            let open_work = agent.open_work_digest().await;
+            let prompt = heartbeat.trigger(&prompts, &reminders, &open_work);
             let req = TurnRequest::new(&prompt.message)
                 .with_metadata(message_metadata_value(
                     MessageVisibility::Internal,
@@ -535,6 +540,11 @@ fn heartbeat_config(settings: &Settings, minimal: bool) -> HeartbeatConfig {
         config.full_context_interval_seconds = 0;
     }
     config
+}
+
+pub(crate) fn open_work_text(settings: &Settings) -> Result<String> {
+    let memory = MemoryStore::from_settings(settings)?;
+    Ok(memory.todos.open_work_digest(20)?)
 }
 
 pub(crate) fn active_reminders_text(settings: &Settings) -> Result<String> {
