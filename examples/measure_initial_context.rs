@@ -203,8 +203,10 @@ async fn main() -> anyhow::Result<()> {
 
     // --- System prompt breakdown ---
     println!("\n--- System prompt breakdown ---");
-    let prompts =
-        lethe::llm::prompts::PromptStore::new(&settings.paths.workspace_dir, &settings.paths.config_dir);
+    let prompts = lethe::llm::prompts::PromptStore::new(
+        &settings.paths.workspace_dir,
+        &settings.paths.config_dir,
+    );
     let instructions = prompts.load("agent_instructions", "").text;
     let tools_doc = prompts.load("agent_tools", "").text;
     let memory_context = memory.get_context_for_prompt()?;

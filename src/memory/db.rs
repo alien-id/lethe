@@ -256,11 +256,7 @@ impl MemoryDb {
 
     /// Write the curator-generated one-line summary for a completed memory.
     /// Recall will prefer this over the full text once it's set.
-    pub fn set_completion_summary(
-        &self,
-        id: &str,
-        value: Option<&str>,
-    ) -> rusqlite::Result<bool> {
+    pub fn set_completion_summary(&self, id: &str, value: Option<&str>) -> rusqlite::Result<bool> {
         let conn = self.open_conn()?;
         let updated = conn.execute(
             "UPDATE memory SET completion_summary = ? WHERE id = ?",
@@ -285,10 +281,7 @@ impl MemoryDb {
              ORDER BY completed_at ASC \
              LIMIT ?",
         )?;
-        let rows = stmt.query_map(
-            params![kind.as_str(), limit as i64],
-            row_to_memory,
-        )?;
+        let rows = stmt.query_map(params![kind.as_str(), limit as i64], row_to_memory)?;
         let mut entries = Vec::new();
         for row in rows {
             entries.push(row?);
@@ -420,10 +413,7 @@ fn ensure_optional_columns(conn: &Connection) -> rusqlite::Result<()> {
             .filter_map(Result::ok)
             .collect()
     };
-    let extras: &[(&str, &str)] = &[
-        ("completed_at", "TEXT"),
-        ("completion_summary", "TEXT"),
-    ];
+    let extras: &[(&str, &str)] = &[("completed_at", "TEXT"), ("completion_summary", "TEXT")];
     for (name, ty) in extras {
         if !existing.iter().any(|column| column == name) {
             conn.execute(

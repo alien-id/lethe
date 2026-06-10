@@ -4,13 +4,13 @@ use kameo::message::{Context, Message};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::actor::{
-    ActorConfig, ActorError, ActorNamedEvent, ActorRegistry, ActorRuntime, ActorSupervisor,
-    MessageIntent, ModelTier,
-};
 use crate::actor::notification::{
     GateAction, GateDecision, NotificationAssessment, NotificationGate, NotificationScoring,
     UserNotificationSignal,
+};
+use crate::actor::{
+    ActorConfig, ActorError, ActorNamedEvent, ActorRegistry, ActorRuntime, ActorSupervisor,
+    MessageIntent, ModelTier,
 };
 use crate::scheduler::curator::CuratorRunStats;
 

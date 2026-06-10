@@ -504,8 +504,8 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
-    use crate::memory::messages::MessageRole;
     use crate::memory::MemoryStore;
+    use crate::memory::messages::MessageRole;
 
     fn store() -> (tempfile::TempDir, MemoryStore) {
         let tmp = tempdir().unwrap();
@@ -548,7 +548,11 @@ mod tests {
         for index in 0..6 {
             store
                 .messages
-                .add(MessageRole::User, &format!("graph email old message {index}"), None)
+                .add(
+                    MessageRole::User,
+                    &format!("graph email old message {index}"),
+                    None,
+                )
                 .unwrap();
         }
 
@@ -672,7 +676,11 @@ mod tests {
             .unwrap();
         store
             .messages
-            .add(MessageRole::Tool, "bash graph output", Some(json!({"name": "bash"})))
+            .add(
+                MessageRole::Tool,
+                "bash graph output",
+                Some(json!({"name": "bash"})),
+            )
             .unwrap();
 
         let hippo = Hippocampus::new(HippocampusConfig {

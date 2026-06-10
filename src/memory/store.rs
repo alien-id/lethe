@@ -264,10 +264,7 @@ impl MemoryStore {
         } else {
             Some(summary.trim())
         };
-        if self
-            .archival
-            .set_completion_summary(identifier, value)?
-        {
+        if self.archival.set_completion_summary(identifier, value)? {
             return Ok(Some(identifier.to_string()));
         }
         if let Some(row) = self.notes.find_row_by_path(Path::new(identifier))? {
@@ -394,16 +391,14 @@ fn memory_data_path_for(db_path: &Path) -> PathBuf {
 /// Copy todos from the pre-consolidation `lethe.db` into the unified memory
 /// DB if (1) the legacy DB exists, (2) it has a `todos` table, and (3) the
 /// unified DB has no todos yet. Subsequent runs are no-ops.
-fn migrate_legacy_todos(
-    legacy_db_path: &Path,
-    unified_db_path: &Path,
-) -> MemoryStoreResult<()> {
+fn migrate_legacy_todos(legacy_db_path: &Path, unified_db_path: &Path) -> MemoryStoreResult<()> {
     if !legacy_db_path.exists() || legacy_db_path == unified_db_path {
         return Ok(());
     }
 
     let unified = rusqlite::Connection::open(unified_db_path)?;
-    let existing_count: i64 = unified.query_row("SELECT COUNT(*) FROM todos", [], |row| row.get(0))?;
+    let existing_count: i64 =
+        unified.query_row("SELECT COUNT(*) FROM todos", [], |row| row.get(0))?;
     if existing_count > 0 {
         return Ok(());
     }
@@ -559,7 +554,10 @@ mod tests {
             .blocks
             .update("project", Some("Port Lethe to Rust."), None)
             .unwrap();
-        store.messages.add(MessageRole::User, "hello", None).unwrap();
+        store
+            .messages
+            .add(MessageRole::User, "hello", None)
+            .unwrap();
         store
             .archival
             .add(

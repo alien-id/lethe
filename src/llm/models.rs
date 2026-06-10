@@ -4,8 +4,7 @@ use std::sync::OnceLock;
 use serde::{Deserialize, Serialize};
 
 const EMBEDDED_MODEL_CATALOG: &str = include_str!("../../config/model_catalog.json");
-const EMBEDDED_CONTEXT_LIMITS: &str =
-    include_str!("../../config/model_context_limits.json");
+const EMBEDDED_CONTEXT_LIMITS: &str = include_str!("../../config/model_context_limits.json");
 
 pub type ModelCatalog = BTreeMap<String, BTreeMap<String, Vec<ModelEntry>>>;
 
@@ -135,7 +134,10 @@ pub fn normalize_model_id(provider: &str, id: &str) -> String {
     let trimmed = id.trim();
     if provider == "openrouter" && !trimmed.is_empty() && !trimmed.starts_with("openrouter/") {
         format!("openrouter/{trimmed}")
-    } else if provider == "opencode-go" && !trimmed.is_empty() && !trimmed.starts_with("opencode-go/") {
+    } else if provider == "opencode-go"
+        && !trimmed.is_empty()
+        && !trimmed.starts_with("opencode-go/")
+    {
         format!("opencode-go/{trimmed}")
     } else {
         id.to_string()
@@ -253,7 +255,10 @@ mod tests {
             normalize_model_id("openrouter", "openrouter/anthropic/claude-opus-4.7"),
             "openrouter/anthropic/claude-opus-4.7"
         );
-        assert_eq!(normalize_model_id("anthropic", "claude-opus-4-8"), "claude-opus-4-8");
+        assert_eq!(
+            normalize_model_id("anthropic", "claude-opus-4-8"),
+            "claude-opus-4-8"
+        );
         // Empty input must not become a bare "openrouter/" prefix.
         assert_eq!(normalize_model_id("openrouter", "  "), "  ");
     }
@@ -293,7 +298,10 @@ mod tests {
 
     #[test]
     fn model_entry_deserialize_three_elements() {
-        let entry: ModelEntry = serde_json::from_str(r#"["Kimi K2.6", "openrouter/moonshotai/kimi-k2.6", "$0.60/$2.80"]"#).unwrap();
+        let entry: ModelEntry = serde_json::from_str(
+            r#"["Kimi K2.6", "openrouter/moonshotai/kimi-k2.6", "$0.60/$2.80"]"#,
+        )
+        .unwrap();
         assert_eq!(entry.name(), "Kimi K2.6");
         assert_eq!(entry.model_id(), "openrouter/moonshotai/kimi-k2.6");
         assert_eq!(entry.price(), "$0.60/$2.80");
@@ -302,7 +310,10 @@ mod tests {
 
     #[test]
     fn model_entry_deserialize_four_elements() {
-        let entry: ModelEntry = serde_json::from_str(r#"["Kimi K2.6", "opencode-go/kimi-k2.6", "$0.60/$2.80", "openai"]"#).unwrap();
+        let entry: ModelEntry = serde_json::from_str(
+            r#"["Kimi K2.6", "opencode-go/kimi-k2.6", "$0.60/$2.80", "openai"]"#,
+        )
+        .unwrap();
         assert_eq!(entry.name(), "Kimi K2.6");
         assert_eq!(entry.model_id(), "opencode-go/kimi-k2.6");
         assert_eq!(entry.price(), "$0.60/$2.80");
@@ -318,7 +329,12 @@ mod tests {
 
     #[test]
     fn model_entry_serialize_four_when_protocol_set() {
-        let entry = ModelEntry("Test".into(), "test-id".into(), "$1".into(), "openai".into());
+        let entry = ModelEntry(
+            "Test".into(),
+            "test-id".into(),
+            "$1".into(),
+            "openai".into(),
+        );
         let json = serde_json::to_string(&entry).unwrap();
         assert_eq!(json, r#"["Test","test-id","$1","openai"]"#);
     }
@@ -338,7 +354,10 @@ mod tests {
 
     #[test]
     fn provider_lookup_finds_opencode_go_prefix() {
-        assert_eq!(provider_for_model("opencode-go/kimi-k2.6"), Some("opencode-go"));
+        assert_eq!(
+            provider_for_model("opencode-go/kimi-k2.6"),
+            Some("opencode-go")
+        );
         assert_eq!(provider_for_model("kimi-k2.6"), None);
     }
 

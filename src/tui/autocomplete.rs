@@ -98,9 +98,7 @@ fn build_index(workspace: &Path) -> Vec<String> {
                 return true;
             }
             let name = entry.file_name().to_string_lossy();
-            !(name.starts_with('.') && name.len() > 1)
-                && name != "target"
-                && name != "node_modules"
+            !(name.starts_with('.') && name.len() > 1) && name != "target" && name != "node_modules"
         })
         .filter_map(|entry| entry.ok())
         .filter(|entry| entry.file_type().is_file())

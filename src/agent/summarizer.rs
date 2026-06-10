@@ -32,9 +32,9 @@ pub(super) async fn update_conversation_summary(
     if dropped_chars(dropped) < MIN_DROPPED_CHARS_FOR_SUMMARY {
         return Ok(None);
     }
-    let existing = memory.conversation_summary().map_err(|error| {
-        anyhow!("failed to load conversation summary: {error}")
-    })?;
+    let existing = memory
+        .conversation_summary()
+        .map_err(|error| anyhow!("failed to load conversation summary: {error}"))?;
     let new_summary = call_summarizer(prompts, router, &existing, dropped).await?;
     let new_summary = new_summary.trim().to_string();
     if new_summary.is_empty() {
@@ -73,10 +73,7 @@ async fn call_summarizer(
         )
         .text;
     let user_text = build_user_payload(prompts, existing, dropped);
-    let messages = vec![
-        LlmMessage::system(system_text),
-        LlmMessage::user(user_text),
-    ];
+    let messages = vec![LlmMessage::system(system_text), LlmMessage::user(user_text)];
     let router = router
         .read()
         .map_err(|error| anyhow!("router lock poisoned: {error}"))?
@@ -85,17 +82,15 @@ async fn call_summarizer(
     router.complete(messages, true).await
 }
 
-fn build_user_payload(
-    prompts: &PromptStore,
-    existing: &str,
-    dropped: &[LlmMessage],
-) -> String {
+fn build_user_payload(prompts: &PromptStore, existing: &str, dropped: &[LlmMessage]) -> String {
     let template_name = if existing.trim().is_empty() {
         "llm_summarize"
     } else {
         "llm_summarize_update"
     };
-    let instructions = prompts.load(template_name, "Summarize the conversation below.").text;
+    let instructions = prompts
+        .load(template_name, "Summarize the conversation below.")
+        .text;
 
     let mut payload = String::new();
     payload.push_str(instructions.trim());
@@ -139,10 +134,7 @@ fn render_dropped_message(message: &LlmMessage) -> String {
             .tool_responses
             .iter()
             .map(|response| {
-                let preview = crate::llm::truncate::truncate_with_ellipsis(
-                    &response.content,
-                    400,
-                );
+                let preview = crate::llm::truncate::truncate_with_ellipsis(&response.content, 400);
                 format!("{}: {}", response.call_id, preview)
             })
             .collect::<Vec<_>>()

@@ -165,9 +165,8 @@ fn run_restore(settings: &Settings, archive: &Path, staging: &Path, yes: bool) -
             if let Some(parent) = settings.paths.db_path.parent() {
                 fs::create_dir_all(parent)?;
             }
-            fs::copy(&src_db, &settings.paths.db_path).with_context(|| {
-                format!("restoring db to {}", settings.paths.db_path.display())
-            })?;
+            fs::copy(&src_db, &settings.paths.db_path)
+                .with_context(|| format!("restoring db to {}", settings.paths.db_path.display()))?;
             println!("Restored db → {}", settings.paths.db_path.display());
         }
     }
@@ -213,15 +212,18 @@ fn copy_dir(src: &Path, dst: &Path) -> Result<()> {
         .status()
         .with_context(|| format!("running cp -R {} {}", src.display(), dst.display()))?;
     if !status.success() {
-        bail!("cp -R {} {} failed ({status})", src.display(), dst.display());
+        bail!(
+            "cp -R {} {} failed ({status})",
+            src.display(),
+            dst.display()
+        );
     }
     Ok(())
 }
 
 fn replace_dir(src: &Path, dst: &Path) -> Result<()> {
     if dst.exists() {
-        fs::remove_dir_all(dst)
-            .with_context(|| format!("removing existing {}", dst.display()))?;
+        fs::remove_dir_all(dst).with_context(|| format!("removing existing {}", dst.display()))?;
     }
     copy_dir(src, dst)
 }

@@ -102,8 +102,9 @@ async fn run_interactive(args: InitArgs) -> Result<()> {
 
     // -- Provider -----------------------------------------------------------
     let provider = match args.provider.as_deref() {
-        Some(p) => Provider::from_id(p)
-            .ok_or_else(|| anyhow!("unknown --provider `{p}` (use openrouter|anthropic|openai|opencode-go)"))?,
+        Some(p) => Provider::from_id(p).ok_or_else(|| {
+            anyhow!("unknown --provider `{p}` (use openrouter|anthropic|openai|opencode-go)")
+        })?,
         None => prompt_provider(&detected)?,
     };
     info(&format!("Using {}", provider.label()));
@@ -332,7 +333,12 @@ impl Provider {
 
 fn detect_keys(existing_env: &EnvMap) -> Vec<&'static str> {
     let mut out = Vec::new();
-    for provider in [Provider::OpenRouter, Provider::Anthropic, Provider::OpenAI, Provider::OpenCodeGo] {
+    for provider in [
+        Provider::OpenRouter,
+        Provider::Anthropic,
+        Provider::OpenAI,
+        Provider::OpenCodeGo,
+    ] {
         let key = provider.key_env();
         let present = std::env::var(key)
             .ok()

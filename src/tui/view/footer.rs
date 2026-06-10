@@ -24,18 +24,12 @@ pub fn draw(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
         ),
         Status::Disconnected => (
             "○ offline",
-            Style::default()
-                .fg(Color::Red)
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
         ),
     };
 
     let tokens = match app.prompt_tokens {
-        Some(value) => format!(
-            "{}/{}k",
-            format_tokens(value),
-            app.max_context / 1000,
-        ),
+        Some(value) => format!("{}/{}k", format_tokens(value), app.max_context / 1000,),
         None => "—".to_string(),
     };
 

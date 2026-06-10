@@ -124,9 +124,7 @@ fn spawn_telegram(
     token: String,
     lock_to_first_user: bool,
 ) -> JoinHandle<()> {
-    let locked = load_state(&dir)
-        .telegram
-        .and_then(|t| t.locked_user_id);
+    let locked = load_state(&dir).telegram.and_then(|t| t.locked_user_id);
 
     settings.telegram.bot_token = token;
     settings.telegram.enabled = true;

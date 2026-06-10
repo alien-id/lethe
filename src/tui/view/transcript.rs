@@ -58,12 +58,7 @@ fn thinking_line(tick: u64) -> Line<'static> {
                 .add_modifier(Modifier::BOLD),
         ),
         Span::raw(" "),
-        Span::styled(
-            "thinking…",
-            Style::default()
-                .fg(Color::Yellow)
-                ,
-        ),
+        Span::styled("thinking…", Style::default().fg(Color::Yellow)),
     ])
 }
 
@@ -76,9 +71,13 @@ fn render_item(item: &TranscriptItem, width: u16, lines: &mut Vec<Line<'static>>
                     .fg(Color::Green)
                     .add_modifier(Modifier::BOLD),
             );
-            push_prefixed(lines, label, content.lines().map(|line| {
-                Line::from(Span::raw(line.to_string()))
-            }));
+            push_prefixed(
+                lines,
+                label,
+                content
+                    .lines()
+                    .map(|line| Line::from(Span::raw(line.to_string()))),
+            );
         }
         TranscriptItem::Assistant { content, .. } => {
             let label = Span::styled(

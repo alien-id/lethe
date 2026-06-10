@@ -128,10 +128,7 @@ impl MessageHistory {
         data_path: impl Into<PathBuf>,
         dimensions: usize,
     ) -> MessageHistoryResult<Self> {
-        Self::open_with_embedder(
-            data_path,
-            EmbeddingEngine::with_hash_dimensions(dimensions),
-        )
+        Self::open_with_embedder(data_path, EmbeddingEngine::with_hash_dimensions(dimensions))
     }
 
     pub fn add(
@@ -587,7 +584,9 @@ mod tests {
     fn add_get_recent_count_and_clear_messages() {
         let (_tmp, history) = history();
         let first = history.add(MessageRole::User, "hello", None).unwrap();
-        let second = history.add(MessageRole::Assistant, "hi there", None).unwrap();
+        let second = history
+            .add(MessageRole::Assistant, "hi there", None)
+            .unwrap();
 
         assert_eq!(history.count().unwrap(), 2);
         assert_eq!(history.get(&first).unwrap().unwrap().content, "hello");

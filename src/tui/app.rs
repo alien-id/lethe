@@ -82,8 +82,7 @@ type Term = Terminal<CrosstermBackend<Stdout>>;
 fn enter_terminal() -> Result<Term> {
     enable_raw_mode().context("enable raw mode")?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)
-        .context("enter alt screen")?;
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture).context("enter alt screen")?;
     Terminal::new(CrosstermBackend::new(stdout)).context("init terminal")
 }
 
@@ -471,11 +470,7 @@ fn apply_completion(editor: &mut TextArea<'_>, apply: CompletionApply) {
     if cur_row != apply.row {
         return;
     }
-    let line = editor
-        .lines()
-        .get(apply.row)
-        .cloned()
-        .unwrap_or_default();
+    let line = editor.lines().get(apply.row).cloned().unwrap_or_default();
     let before: String = line.chars().take(apply.start_col).collect();
     let after: String = line.chars().skip(apply.cursor_col).collect();
     let mut new_line = before;

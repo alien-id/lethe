@@ -101,8 +101,7 @@ fn generate_pkce() -> (String, String) {
     let verifier = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
     let mut hasher = Sha256::new();
     hasher.update(verifier.as_bytes());
-    let challenge =
-        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(hasher.finalize());
+    let challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(hasher.finalize());
     (verifier, challenge)
 }
 
@@ -152,10 +151,7 @@ async fn exchange_authorization_code(
         Value::String(ANTHROPIC_OAUTH_CLIENT_ID.to_string()),
     );
     body.insert("redirect_uri".into(), Value::String(REDIRECT_URI.into()));
-    body.insert(
-        "code_verifier".into(),
-        Value::String(verifier.to_string()),
-    );
+    body.insert("code_verifier".into(), Value::String(verifier.to_string()));
     if let Some(state) = state
         && !state.is_empty()
     {
@@ -200,8 +196,7 @@ fn url_encode(value: &str) -> String {
     // that isn't unreserved (RFC 3986). No external dep.
     let mut out = String::with_capacity(value.len());
     for byte in value.bytes() {
-        let unreserved = byte.is_ascii_alphanumeric()
-            || matches!(byte, b'-' | b'_' | b'.' | b'~');
+        let unreserved = byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~');
         if unreserved {
             out.push(byte as char);
         } else {
@@ -234,7 +229,10 @@ fn prompt_line(prompt: &str) -> Result<String> {
     let stdin = io::stdin();
     let mut line = String::new();
     stdin.lock().read_line(&mut line)?;
-    Ok(line.trim_end_matches('\n').trim_end_matches('\r').to_string())
+    Ok(line
+        .trim_end_matches('\n')
+        .trim_end_matches('\r')
+        .to_string())
 }
 
 fn unix_now_seconds() -> f64 {
@@ -270,8 +268,7 @@ mod tests {
         assert!(challenge.len() >= 43);
         let mut hasher = Sha256::new();
         hasher.update(verifier.as_bytes());
-        let expected =
-            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(hasher.finalize());
+        let expected = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(hasher.finalize());
         assert_eq!(challenge, expected);
     }
 
@@ -292,10 +289,7 @@ mod tests {
     fn url_encode_handles_reserved_and_unreserved_chars() {
         assert_eq!(url_encode("abc-XYZ_0.9~"), "abc-XYZ_0.9~");
         assert_eq!(url_encode("a b/c?d"), "a%20b%2Fc%3Fd");
-        assert_eq!(
-            url_encode("org:create_api_key"),
-            "org%3Acreate_api_key"
-        );
+        assert_eq!(url_encode("org:create_api_key"), "org%3Acreate_api_key");
     }
 
     #[test]

@@ -62,9 +62,15 @@ async fn execute_research(registry: &ToolRegistry<'_>, args: &Value) -> String {
         }
     } else {
         match serde_json::from_str::<Vec<String>>(&provided) {
-            Ok(v) => v.into_iter().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect(),
+            Ok(v) => v
+                .into_iter()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect(),
             Err(error) => {
-                return format!("Error: hypotheses must be a JSON array of strings. Parse error: {error}");
+                return format!(
+                    "Error: hypotheses must be a JSON array of strings. Parse error: {error}"
+                );
             }
         }
     };
@@ -121,17 +127,13 @@ async fn execute_research(registry: &ToolRegistry<'_>, args: &Value) -> String {
             }
             match context.runtime.actor_info(id).await {
                 Some(info) if info.state == ActorState::Terminated => {
-                    findings[index] = Some(
-                        info.result
-                            .unwrap_or_else(|| "[no result]".to_string()),
-                    );
+                    findings[index] =
+                        Some(info.result.unwrap_or_else(|| "[no result]".to_string()));
                 }
                 Some(_) => {}
                 None => {
-                    findings[index] = Some(format!(
-                        "[hypothesis {} actor {id} disappeared]",
-                        index + 1
-                    ));
+                    findings[index] =
+                        Some(format!("[hypothesis {} actor {id} disappeared]", index + 1));
                 }
             }
         }
@@ -154,8 +156,7 @@ async fn execute_research(registry: &ToolRegistry<'_>, args: &Value) -> String {
         })
         .collect();
 
-    let findings_json =
-        serde_json::to_string(&findings_str).unwrap_or_else(|_| "[]".to_string());
+    let findings_json = serde_json::to_string(&findings_str).unwrap_or_else(|_| "[]".to_string());
     let judge_goals = JUDGE_PROMPT
         .replace("{question}", &question)
         .replace("{findings}", &findings_json);
@@ -183,9 +184,7 @@ async fn execute_research(registry: &ToolRegistry<'_>, args: &Value) -> String {
 
     match poll_until_terminated(context, &judge_id, JUDGE_TIMEOUT).await {
         Ok((verdict, _)) => verdict,
-        Err(error) => format!(
-            "Research: judge failed: {error}\n\nRaw findings:\n{findings_json}"
-        ),
+        Err(error) => format!("Research: judge failed: {error}\n\nRaw findings:\n{findings_json}"),
     }
 }
 

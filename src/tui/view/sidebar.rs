@@ -99,10 +99,7 @@ fn actor_line(actor: &ActorRow, indent: bool) -> Line<'static> {
         Span::raw(" "),
         Span::styled(badge, Style::default().fg(state_color)),
         Span::raw(" "),
-        Span::styled(
-            short_id(&actor.id),
-            Style::default().fg(Color::Gray),
-        ),
+        Span::styled(short_id(&actor.id), Style::default().fg(Color::Gray)),
     ])
 }
 
@@ -137,12 +134,7 @@ fn draw_todos(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
 
 fn todo_line(todo: &TodoRow) -> Line<'static> {
     let (marker, marker_style) = match todo.status.as_str() {
-        "completed" => (
-            "▣",
-            Style::default()
-                .fg(Color::Green)
-                ,
-        ),
+        "completed" => ("▣", Style::default().fg(Color::Green)),
         "cancelled" => (
             "▢",
             Style::default()
@@ -152,9 +144,7 @@ fn todo_line(todo: &TodoRow) -> Line<'static> {
         _ => ("▢", Style::default().fg(Color::Yellow)),
     };
     let priority_style = match todo.priority.as_str() {
-        "high" => Style::default()
-            .fg(Color::Red)
-            .add_modifier(Modifier::BOLD),
+        "high" => Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
         "low" => Style::default().fg(Color::Gray),
         _ => Style::default().fg(Color::Gray),
     };

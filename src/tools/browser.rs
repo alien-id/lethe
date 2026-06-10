@@ -235,15 +235,14 @@ fn exec_browser_snapshot(registry: &ToolRegistry<'_>, args: &Value) -> String {
 }
 
 fn exec_browser_click(registry: &ToolRegistry<'_>, args: &Value) -> String {
-    registry
-        .browser
-        .click(&string_arg(args, "ref_or_selector"))
+    registry.browser.click(&string_arg(args, "ref_or_selector"))
 }
 
 fn exec_browser_fill(registry: &ToolRegistry<'_>, args: &Value) -> String {
-    registry
-        .browser
-        .fill(&string_arg(args, "ref_or_selector"), &string_arg(args, "text"))
+    registry.browser.fill(
+        &string_arg(args, "ref_or_selector"),
+        &string_arg(args, "text"),
+    )
 }
 
 pub const TOOL_DEFS: &[ToolDef] = &[
@@ -267,7 +266,10 @@ pub const TOOL_DEFS: &[ToolDef] = &[
     ToolDef {
         name: "browser_click",
         description: "Click an element by snapshot ref or selector.",
-        params: &[p_str_req("ref_or_selector", "Element ref (@e1) or selector.")],
+        params: &[p_str_req(
+            "ref_or_selector",
+            "Element ref (@e1) or selector.",
+        )],
         category: ToolCategory::Requestable,
         execute: ToolExecutor::Sync(exec_browser_click),
     },

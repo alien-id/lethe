@@ -10,8 +10,8 @@ use thiserror::Error;
 use uuid::Uuid;
 use walkdir::WalkDir;
 
-use super::search::{clean_tags, query_terms};
 use super::db::{MemoryDb, MemoryKind, MemoryRow, NewMemoryRow};
+use super::search::{clean_tags, query_terms};
 
 #[derive(Debug, Error)]
 pub enum NoteError {

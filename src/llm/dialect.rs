@@ -7,7 +7,7 @@
 //! [`dialect_for_model`].
 
 use crate::llm::CacheHint;
-use crate::llm::models::{provider_for_model, protocol_for_model};
+use crate::llm::models::{protocol_for_model, provider_for_model};
 
 /// Behaviour knobs the system-prompt assembler queries per turn. Currently
 /// the only differentiator we need across families is whether to attach

@@ -473,9 +473,7 @@ use serde_json::Value;
 
 use crate::tools::registry::ToolRegistry;
 use crate::tools::registry::args::{bool_arg, string_arg, string_arg_default, usize_arg};
-use crate::tools::spec::{
-    ToolCategory, ToolDef, ToolExecutor, p_bool, p_int, p_str, p_str_req,
-};
+use crate::tools::spec::{ToolCategory, ToolDef, ToolExecutor, p_bool, p_int, p_str, p_str_req};
 
 fn exec_read_file(registry: &ToolRegistry<'_>, args: &Value) -> String {
     registry.files.read_file(

@@ -1235,9 +1235,7 @@ impl IncomingTelegramCallback {
             .filter(|label| !label.is_empty())
         {
             Some(label) if label == data => format!("[Telegram button pressed: {label}]"),
-            Some(label) => format!(
-                "[Telegram button pressed: {label}]\nCallback data: {data}"
-            ),
+            Some(label) => format!("[Telegram button pressed: {label}]\nCallback data: {data}"),
             None => format!("[Telegram callback data: {data}]"),
         }
     }
@@ -2770,11 +2768,7 @@ mod tests {
         register_pending_reply_keyboard(chat_id, user_id, 6, &inline_markup);
         register_pending_reply_keyboard(chat_id, user_id, 7, &remove_markup);
 
-        assert!(!pending_reply_keyboard_matches(
-            chat_id,
-            user_id + 1,
-            "Yes"
-        ));
+        assert!(!pending_reply_keyboard_matches(chat_id, user_id + 1, "Yes"));
         assert!(pending_reply_keyboard_matches(chat_id, user_id, "Yes"));
         assert!(forget_pending_reply_keyboard_match(chat_id, user_id, "Yes"));
         assert!(!pending_reply_keyboard_matches(chat_id, user_id, "Yes"));

@@ -17,8 +17,7 @@ use crate::tools::spec::{
 };
 
 const TASK_STATE_VALUES: &[&str] = &["planned", "running", "blocked", "done"];
-const MISSING_ACTOR_CONTEXT: &str =
-    "Actor context not set. This tool only works inside an actor.";
+const MISSING_ACTOR_CONTEXT: &str = "Actor context not set. This tool only works inside an actor.";
 
 async fn run_actor_command(
     registry: &ToolRegistry<'_>,
@@ -309,7 +308,7 @@ pub const TOOL_DEFS: &[ToolDef] = &[
     ToolDef {
         name: "wait_for_response",
         description: "Pop the next message from this actor's inbox.",
-        params: &[p_int("timeout", "Timeout seconds (compat)." )],
+        params: &[p_int("timeout", "Timeout seconds (compat).")],
         category: ToolCategory::Actor,
         execute: ToolExecutor::Async(exec_wait_for_response),
     },

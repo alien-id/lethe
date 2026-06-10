@@ -8,8 +8,8 @@ use serde_json::{Value, json};
 use thiserror::Error;
 use uuid::Uuid;
 
-use super::search::{clean_tags, indent_block, query_terms, search_result_text, tags_match_any};
 use super::db::{MemoryDb, MemoryKind, MemoryRow, NewMemoryRow};
+use super::search::{clean_tags, indent_block, query_terms, search_result_text, tags_match_any};
 
 const SEARCH_RESULT_MAX_LINES: usize = 50;
 
@@ -262,7 +262,10 @@ impl ArchivalMemory {
             lines.push(format!("tags: {}", entry.tags.join(", ")));
         }
         if entry.metadata.is_object()
-            && entry.metadata.as_object().is_some_and(|map| !map.is_empty())
+            && entry
+                .metadata
+                .as_object()
+                .is_some_and(|map| !map.is_empty())
         {
             lines.push(format!(
                 "metadata: {}",

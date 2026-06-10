@@ -103,9 +103,10 @@ use crate::tools::registry::args::{string_arg, usize_arg};
 use crate::tools::spec::{ToolCategory, ToolDef, ToolExecutor, p_int, p_str_req};
 
 fn exec_view_image(registry: &ToolRegistry<'_>, args: &Value) -> String {
-    registry
-        .image
-        .view_image(&string_arg(args, "file_path"), usize_arg(args, "max_size", 1568))
+    registry.image.view_image(
+        &string_arg(args, "file_path"),
+        usize_arg(args, "max_size", 1568),
+    )
 }
 
 pub const TOOL_DEFS: &[ToolDef] = &[ToolDef {

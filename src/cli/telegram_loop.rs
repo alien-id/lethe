@@ -25,8 +25,8 @@ use lethe::conversation::{ConversationManager, ProcessCallback, ProcessContext};
 use lethe::interfaces::telegram::{
     FirstUserLockCallback, IncomingTelegramCallback, IncomingTelegramText, SharedTelegramTurnGuard,
     TelegramClient, TelegramToolContext, TelegramTurnGuard, TelegramTypingObserver,
-    VisibleTelegramChannel, image_mime_type_from_path, is_emoji_only_reply, split_telegram_messages,
-    forget_pending_reply_keyboard_match, pending_reply_keyboard_matches,
+    VisibleTelegramChannel, forget_pending_reply_keyboard_match, image_mime_type_from_path,
+    is_emoji_only_reply, pending_reply_keyboard_matches, split_telegram_messages,
 };
 use lethe::memory::MessageRole;
 use lethe::memory::message_metadata::{
@@ -565,35 +565,30 @@ fn telegram_process_callback(
             if let Some(metadata) = metadata_value_from_map(&context.metadata) {
                 req = req.with_metadata(metadata);
             }
-            let response = match with_telegram_typing(
-                &client,
-                context.chat_id,
-                agent.chat_once(req),
-            )
-            .await
-            {
-                Ok(response) => response,
-                Err(error) => {
-                    let error = anyhow::Error::new(error);
-                    // Don't fail silently when the user is out of credits — the
-                    // hosted metering proxy rejects the LLM call with 402; reply.
-                    if error_is_out_of_credits(&error) {
-                        let _ = client
-                            .send_message(context.chat_id, OUT_OF_CREDITS_MESSAGE)
-                            .await;
-                        agent.emit_conversation_event(
-                            "message",
-                            serde_json::json!({
-                                "role": "assistant",
-                                "content": OUT_OF_CREDITS_MESSAGE,
-                                "source": "telegram",
-                            }),
-                        );
-                        return Ok(());
+            let response =
+                match with_telegram_typing(&client, context.chat_id, agent.chat_once(req)).await {
+                    Ok(response) => response,
+                    Err(error) => {
+                        let error = anyhow::Error::new(error);
+                        // Don't fail silently when the user is out of credits — the
+                        // hosted metering proxy rejects the LLM call with 402; reply.
+                        if error_is_out_of_credits(&error) {
+                            let _ = client
+                                .send_message(context.chat_id, OUT_OF_CREDITS_MESSAGE)
+                                .await;
+                            agent.emit_conversation_event(
+                                "message",
+                                serde_json::json!({
+                                    "role": "assistant",
+                                    "content": OUT_OF_CREDITS_MESSAGE,
+                                    "source": "telegram",
+                                }),
+                            );
+                            return Ok(());
+                        }
+                        return Err(error);
                     }
-                    return Err(error);
-                }
-            };
+                };
             if !context.interrupt.is_interrupted() {
                 tracing::info!(
                     chat_id = context.chat_id,
@@ -1450,7 +1445,9 @@ mod tests {
         let err = anyhow::anyhow!("LLM streaming chat request failed")
             .context("Status: 402 Payment Required Body: {\"message\":\"Out of credits\"}");
         assert!(error_is_out_of_credits(&err));
-        assert!(!error_is_out_of_credits(&anyhow::anyhow!("connection reset by peer")));
+        assert!(!error_is_out_of_credits(&anyhow::anyhow!(
+            "connection reset by peer"
+        )));
     }
 
     fn test_settings(root: &std::path::Path) -> Settings {

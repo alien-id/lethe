@@ -354,7 +354,8 @@ impl LlmRouter {
             .with_capture_tool_calls(true)
             .with_capture_usage(true)
             .with_capture_reasoning_content(true);
-        let request_log = llm_debug_request_payload("genai-stream", model, use_aux, &request, &options);
+        let request_log =
+            llm_debug_request_payload("genai-stream", model, use_aux, &request, &options);
         let stream_response = match self
             .client
             .exec_chat_stream(model, request.clone(), Some(&options))
@@ -365,8 +366,9 @@ impl LlmRouter {
                 // Pre-stream failure (network / rate-limit blip before any bytes
                 // arrived): fall back to the non-streaming path so the user still
                 // gets the reply, surfaced via a single delta.
-                let error = anyhow::Error::new(error)
-                    .context(format!("LLM streaming chat request failed for model {model}"));
+                let error = anyhow::Error::new(error).context(format!(
+                    "LLM streaming chat request failed for model {model}"
+                ));
                 log_llm_interaction(
                     "chat_stream_error",
                     model,
@@ -415,10 +417,9 @@ impl LlmRouter {
                 Err(error) => {
                     // Mid-stream failure: some deltas may already be on screen, so
                     // we don't retry (that would duplicate text) — surface the error.
-                    stream_error = Some(
-                        anyhow::Error::new(error)
-                            .context(format!("LLM streaming chat request failed for model {model}")),
-                    );
+                    stream_error = Some(anyhow::Error::new(error).context(format!(
+                        "LLM streaming chat request failed for model {model}"
+                    )));
                     break;
                 }
             }
@@ -573,10 +574,19 @@ fn genai_error_is_retryable(error: &genai::Error) -> bool {
     {
         return true;
     }
-    if ["'500'", "'502'", "'503'", "'504'", "internal server error", "bad gateway",
-        "service unavailable", "gateway timeout", "overloaded"]
-        .iter()
-        .any(|m| s.contains(m))
+    if [
+        "'500'",
+        "'502'",
+        "'503'",
+        "'504'",
+        "internal server error",
+        "bad gateway",
+        "service unavailable",
+        "gateway timeout",
+        "overloaded",
+    ]
+    .iter()
+    .any(|m| s.contains(m))
     {
         return true;
     }

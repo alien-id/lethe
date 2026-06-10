@@ -365,8 +365,8 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
-    use crate::memory::messages::MessageRole;
     use crate::memory::MemoryStore;
+    use crate::memory::messages::MessageRole;
 
     fn store() -> (tempfile::TempDir, MemoryStore) {
         let tmp = tempdir().unwrap();
@@ -415,7 +415,10 @@ mod tests {
                 None,
             )
             .unwrap();
-        store.messages.add(MessageRole::Assistant, "ok", None).unwrap();
+        store
+            .messages
+            .add(MessageRole::Assistant, "ok", None)
+            .unwrap();
         store
             .messages
             .add(

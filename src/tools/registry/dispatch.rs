@@ -23,9 +23,9 @@ impl<'a> ToolRegistry<'a> {
         };
         match def.execute {
             ToolExecutor::Sync(f) => f(self, args),
-            ToolExecutor::Async(_) => format!(
-                "Error: tool '{name}' requires async tool execution."
-            ),
+            ToolExecutor::Async(_) => {
+                format!("Error: tool '{name}' requires async tool execution.")
+            }
         }
     }
 }

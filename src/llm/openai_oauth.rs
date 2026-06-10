@@ -42,8 +42,7 @@ use crate::llm::client::DeltaCallback;
 
 const OPENAI_OAUTH_ISSUER: &str = "https://auth.openai.com";
 const OPENAI_OAUTH_TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
-const OPENAI_DEVICE_USERCODE_URL: &str =
-    "https://auth.openai.com/api/accounts/deviceauth/usercode";
+const OPENAI_DEVICE_USERCODE_URL: &str = "https://auth.openai.com/api/accounts/deviceauth/usercode";
 const OPENAI_DEVICE_TOKEN_URL: &str = "https://auth.openai.com/api/accounts/deviceauth/token";
 const OPENAI_RESPONSES_URL: &str = "https://chatgpt.com/backend-api/codex/responses";
 /// Public client id used by Codex-compatible CLIs; same value the
@@ -333,10 +332,7 @@ impl OpenAiOAuthClient {
         };
         let body = openai_responses_body(model, request, options);
         let mut headers = openai_oauth_headers(&access_token, account_id.as_deref());
-        headers.insert(
-            "accept",
-            HeaderValue::from_static("text/event-stream"),
-        );
+        headers.insert("accept", HeaderValue::from_static("text/event-stream"));
 
         let _permit = self
             .request_gate
@@ -363,7 +359,10 @@ impl OpenAiOAuthClient {
             self.set_rate_limit(retry_after).await;
             let text = response.text().await.unwrap_or_default();
             return Err(OpenAiOAuthError::RateLimited {
-                message: format!("OpenAI OAuth stream rate limited (429) - {}", truncate_err(&text)),
+                message: format!(
+                    "OpenAI OAuth stream rate limited (429) - {}",
+                    truncate_err(&text)
+                ),
                 retry_after,
             });
         }
@@ -440,9 +439,10 @@ impl OpenAiOAuthClient {
             })?;
 
         let status = response.status();
-        let text = response.text().await.map_err(|error| {
-            anyhow!("OpenAI OAuth token refresh response read failed: {error}")
-        })?;
+        let text = response
+            .text()
+            .await
+            .map_err(|error| anyhow!("OpenAI OAuth token refresh response read failed: {error}"))?;
         if !status.is_success() {
             return Err(anyhow!(
                 "OpenAI OAuth token refresh failed: {} {}",
@@ -554,7 +554,9 @@ fn build_user_agent() -> String {
 const OPENAI_OAUTH_MAX_BODY_BYTES: usize = 500_000;
 
 fn openai_body_size_bytes(body: &Value) -> usize {
-    serde_json::to_vec(body).map(|bytes| bytes.len()).unwrap_or(usize::MAX)
+    serde_json::to_vec(body)
+        .map(|bytes| bytes.len())
+        .unwrap_or(usize::MAX)
 }
 
 fn trim_openai_input_items(body: &mut Value) {
@@ -846,7 +848,10 @@ impl OpenAiStreamState {
         let Some(payload_obj) = payload.as_object() else {
             return;
         };
-        let payload_type = payload_obj.get("type").and_then(Value::as_str).unwrap_or("");
+        let payload_type = payload_obj
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or("");
         if let Some(message) = openai_stream_error_message(event_name, payload_type, payload_obj) {
             self.error = Some(message);
             self.done = true;
@@ -875,7 +880,10 @@ impl OpenAiStreamState {
             self.record_item(item);
         }
 
-        let payload_type = payload_obj.get("type").and_then(Value::as_str).unwrap_or("");
+        let payload_type = payload_obj
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or("");
         match payload_type {
             "response.output_text.delta" | "response.refusal.delta" => {
                 if let Some(delta) = payload_obj.get("delta").and_then(Value::as_str)
@@ -1017,7 +1025,10 @@ fn parse_streamed_response(raw: &str) -> Result<Value> {
         let Some(payload_obj) = payload.as_object() else {
             continue;
         };
-        let payload_type = payload_obj.get("type").and_then(Value::as_str).unwrap_or("");
+        let payload_type = payload_obj
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or("");
         if let Some(message) = openai_stream_error_message(&event_name, payload_type, payload_obj) {
             return Err(anyhow!("OpenAI OAuth stream failed: {message}"));
         }
@@ -1105,10 +1116,7 @@ fn parse_streamed_response(raw: &str) -> Result<Value> {
 }
 
 fn openai_response_to_chat_response(data: Value, requested_model: &str) -> Result<ChatResponse> {
-    let response = data
-        .get("response")
-        .cloned()
-        .unwrap_or(data);
+    let response = data.get("response").cloned().unwrap_or(data);
     let output = response
         .get("output")
         .and_then(Value::as_array)
@@ -1118,7 +1126,9 @@ fn openai_response_to_chat_response(data: Value, requested_model: &str) -> Resul
     let mut parts: Vec<ContentPart> = Vec::new();
     let mut text_buf = String::new();
     for item in &output {
-        let Some(obj) = item.as_object() else { continue };
+        let Some(obj) = item.as_object() else {
+            continue;
+        };
         let item_type = obj.get("type").and_then(Value::as_str).unwrap_or("");
         match item_type {
             "message" => {
@@ -1128,7 +1138,8 @@ fn openai_response_to_chat_response(data: Value, requested_model: &str) -> Resul
                             Some(obj) => obj,
                             None => continue,
                         };
-                        let block_type = block_obj.get("type").and_then(Value::as_str).unwrap_or("");
+                        let block_type =
+                            block_obj.get("type").and_then(Value::as_str).unwrap_or("");
                         if matches!(block_type, "output_text" | "text")
                             && let Some(text) = block_obj.get("text").and_then(Value::as_str)
                         {
@@ -1194,7 +1205,9 @@ fn openai_response_to_chat_response(data: Value, requested_model: &str) -> Resul
             Some(total) => Some(total as i32),
             None => prompt.zip(completion).map(|(p, c)| p + c),
         };
-        if let Some(input_details) = raw_usage.get("input_tokens_details").and_then(Value::as_object)
+        if let Some(input_details) = raw_usage
+            .get("input_tokens_details")
+            .and_then(Value::as_object)
             && let Some(cached) = input_details.get("cached_tokens").and_then(Value::as_i64)
         {
             usage.prompt_tokens_details = Some(PromptTokensDetails {
@@ -1345,7 +1358,9 @@ pub async fn run_device_login() -> Result<()> {
     println!("Device-code flow. Approve in your browser, then return here.");
     println!();
 
-    let device = start_device_flow(&http).await.context("starting device flow")?;
+    let device = start_device_flow(&http)
+        .await
+        .context("starting device flow")?;
     let device_auth_id = device
         .get("device_auth_id")
         .and_then(Value::as_str)
@@ -1358,7 +1373,11 @@ pub async fn run_device_login() -> Result<()> {
         .to_string();
     let interval = device
         .get("interval")
-        .and_then(|value| value.as_u64().or_else(|| value.as_str().and_then(|s| s.parse().ok())))
+        .and_then(|value| {
+            value
+                .as_u64()
+                .or_else(|| value.as_str().and_then(|s| s.parse().ok()))
+        })
         .unwrap_or(5);
     let verification_uri = device
         .get("verification_uri_complete")
@@ -1421,9 +1440,8 @@ pub async fn run_device_login() -> Result<()> {
         env_access_token: false,
     };
     let token_file = openai_oauth_token_file();
-    write_openai_oauth_tokens(&token_file, &tokens).with_context(|| {
-        format!("writing OpenAI OAuth tokens to {}", token_file.display())
-    })?;
+    write_openai_oauth_tokens(&token_file, &tokens)
+        .with_context(|| format!("writing OpenAI OAuth tokens to {}", token_file.display()))?;
 
     println!();
     println!("OAuth tokens saved to {}", token_file.display());
@@ -1432,7 +1450,10 @@ pub async fn run_device_login() -> Result<()> {
         if refresh_token.is_some() { "yes" } else { "no" }
     );
     println!("Expires in: {expires_in:.0}s");
-    println!("Account id: {}", account_id.as_deref().unwrap_or("(not found)"));
+    println!(
+        "Account id: {}",
+        account_id.as_deref().unwrap_or("(not found)")
+    );
     Ok(())
 }
 
@@ -1453,9 +1474,8 @@ async fn start_device_flow(http: &reqwest::Client) -> Result<Value> {
             truncate_err(&text)
         );
     }
-    serde_json::from_str(&text).with_context(|| {
-        format!("invalid device auth response JSON: {}", truncate_err(&text))
-    })
+    serde_json::from_str(&text)
+        .with_context(|| format!("invalid device auth response JSON: {}", truncate_err(&text)))
 }
 
 async fn poll_for_authorization_code(
@@ -1532,9 +1552,8 @@ async fn exchange_authorization_code(
             truncate_err(&text)
         );
     }
-    serde_json::from_str(&text).with_context(|| {
-        format!("invalid token exchange response: {}", truncate_err(&text))
-    })
+    serde_json::from_str(&text)
+        .with_context(|| format!("invalid token exchange response: {}", truncate_err(&text)))
 }
 
 fn best_effort_open(url: &str) {
@@ -1660,15 +1679,17 @@ mod tests {
         assert!(body_bytes <= OPENAI_OAUTH_MAX_BODY_BYTES);
         assert!(input.len() < 20);
         assert!(input.first().and_then(|item| item.get("role")).is_some());
-        assert!(input
-            .last()
-            .and_then(|item| item.get("content"))
-            .and_then(Value::as_array)
-            .and_then(|content| content.first())
-            .and_then(|part| part.get("text"))
-            .and_then(Value::as_str)
-            .unwrap()
-            .contains("msg-19:"));
+        assert!(
+            input
+                .last()
+                .and_then(|item| item.get("content"))
+                .and_then(Value::as_array)
+                .and_then(|content| content.first())
+                .and_then(|part| part.get("text"))
+                .and_then(Value::as_str)
+                .unwrap()
+                .contains("msg-19:")
+        );
     }
 
     #[test]

@@ -78,14 +78,12 @@ pub fn update_env_file(
             "No .env at {} — run `lethe init` to set models and other settings,",
             env_path.display()
         );
-        println!(
-            "or write `LLM_PROVIDER={provider}` and `LLM_MODEL=<id>` there yourself."
-        );
+        println!("or write `LLM_PROVIDER={provider}` and `LLM_MODEL=<id>` there yourself.");
         return Ok(());
     }
 
-    let existing = fs::read_to_string(env_path)
-        .with_context(|| format!("reading {}", env_path.display()))?;
+    let existing =
+        fs::read_to_string(env_path).with_context(|| format!("reading {}", env_path.display()))?;
     let stamp = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S %Z");
     let mut lines: Vec<String> = Vec::new();
     let mut provider_set = false;
@@ -107,11 +105,15 @@ pub fn update_env_file(
         let key = key.trim();
         if key.eq_ignore_ascii_case("LLM_PROVIDER") {
             if !provider_set {
-                lines.push(format!("# {raw}   # was: pre-login provider, updated {stamp}"));
+                lines.push(format!(
+                    "# {raw}   # was: pre-login provider, updated {stamp}"
+                ));
                 lines.push(format!("LLM_PROVIDER={provider}"));
                 provider_set = true;
             } else {
-                lines.push(format!("# {raw}   # duplicate LLM_PROVIDER, commented {stamp}"));
+                lines.push(format!(
+                    "# {raw}   # duplicate LLM_PROVIDER, commented {stamp}"
+                ));
             }
         } else if key.eq_ignore_ascii_case("LLM_MODEL") && main_model.is_some() {
             if !main_set {
@@ -119,7 +121,9 @@ pub fn update_env_file(
                 lines.push(format!("LLM_MODEL={}", main_model.unwrap()));
                 main_set = true;
             } else {
-                lines.push(format!("# {raw}   # duplicate LLM_MODEL, commented {stamp}"));
+                lines.push(format!(
+                    "# {raw}   # duplicate LLM_MODEL, commented {stamp}"
+                ));
             }
         } else if key.eq_ignore_ascii_case("LLM_MODEL_AUX") && aux_model.is_some() {
             if !aux_set {
@@ -127,21 +131,25 @@ pub fn update_env_file(
                 lines.push(format!("LLM_MODEL_AUX={}", aux_model.unwrap()));
                 aux_set = true;
             } else {
-                lines.push(format!("# {raw}   # duplicate LLM_MODEL_AUX, commented {stamp}"));
+                lines.push(format!(
+                    "# {raw}   # duplicate LLM_MODEL_AUX, commented {stamp}"
+                ));
             }
         } else if let Some((set_env, set_value)) = set_key
             && key.eq_ignore_ascii_case(set_env)
         {
             if !api_key_set {
-                lines.push(format!("# {raw}   # was: previous {set_env}, updated {stamp}"));
+                lines.push(format!(
+                    "# {raw}   # was: previous {set_env}, updated {stamp}"
+                ));
                 lines.push(format!("{set_env}={set_value}"));
                 api_key_set = true;
             } else {
-                lines.push(format!("# {raw}   # duplicate {set_env}, commented {stamp}"));
+                lines.push(format!(
+                    "# {raw}   # duplicate {set_env}, commented {stamp}"
+                ));
             }
-        } else if key_env_to_comment
-            .is_some_and(|target| key.eq_ignore_ascii_case(target))
-        {
+        } else if key_env_to_comment.is_some_and(|target| key.eq_ignore_ascii_case(target)) {
             lines.push(format!("# {raw}   # not used by OAuth, commented {stamp}"));
             api_key_commented = true;
         } else {
@@ -196,9 +204,7 @@ pub fn update_env_file(
     if let Some(aux) = aux_model {
         println!("  LLM_MODEL_AUX={aux}");
     }
-    if api_key_commented
-        && let Some(key_env) = key_env_to_comment
-    {
+    if api_key_commented && let Some(key_env) = key_env_to_comment {
         println!("  {key_env} commented out (not used by OAuth; left for rollback)");
     }
     if let Some((set_env, _)) = set_key {
@@ -236,27 +242,15 @@ pub fn prompt_api_key_line(label: &str) -> Result<String> {
 pub fn catalog_defaults(provider: &str) -> Option<(String, String)> {
     let catalog = crate::llm::models::model_catalog();
     let provider_entry = catalog.get(provider)?;
-    let main = provider_entry
-        .get("main")?
-        .first()?
-        .model_id()
-        .to_string();
-    let aux = provider_entry
-        .get("aux")?
-        .first()?
-        .model_id()
-        .to_string();
+    let main = provider_entry.get("main")?.first()?.model_id().to_string();
+    let aux = provider_entry.get("aux")?.first()?.model_id().to_string();
     Some((main, aux))
 }
 
 /// API-key login: prompt for the key + main/aux models (with catalog
 /// defaults), then write everything to `.env`. Shared between
 /// openrouter and the API-key path of openai/anthropic.
-pub fn run_api_key_login(
-    provider: &str,
-    key_env: &str,
-    prompt_label: &str,
-) -> Result<()> {
+pub fn run_api_key_login(provider: &str, key_env: &str, prompt_label: &str) -> Result<()> {
     let key = prompt_api_key_line(prompt_label)?;
     let (main_model, aux_model) = prompt_provider_models(provider)?;
     update_env_after_api_key_login(
@@ -303,15 +297,11 @@ const OPENCODE_GO_PREFIX: &str = "opencode-go/";
 
 fn prompt_one_model(provider: &str, label: &str, default: &str) -> Result<String> {
     if provider == "openrouter" {
-        let display_default = default
-            .strip_prefix(OPENROUTER_PREFIX)
-            .unwrap_or(default);
+        let display_default = default.strip_prefix(OPENROUTER_PREFIX).unwrap_or(default);
         let raw = prompt_model_id(label, display_default)?;
         Ok(prefix_openrouter(&raw))
     } else if provider == "opencode-go" {
-        let display_default = default
-            .strip_prefix(OPENCODE_GO_PREFIX)
-            .unwrap_or(default);
+        let display_default = default.strip_prefix(OPENCODE_GO_PREFIX).unwrap_or(default);
         let raw = prompt_model_id(label, display_default)?;
         Ok(prefix_opencode_go(&raw))
     } else {
@@ -394,10 +384,7 @@ fn write_env_atomically(path: &Path, body: &str) -> Result<()> {
         .parent()
         .ok_or_else(|| anyhow!(".env path has no parent: {}", path.display()))?;
     fs::create_dir_all(parent)?;
-    let temp = parent.join(format!(
-        ".env.lethe-login.{}.tmp",
-        std::process::id()
-    ));
+    let temp = parent.join(format!(".env.lethe-login.{}.tmp", std::process::id()));
     fs::write(&temp, body).with_context(|| format!("writing {}", temp.display()))?;
     #[cfg(unix)]
     {
@@ -522,13 +509,19 @@ TELEGRAM_BOT_TOKEN=tg
 
     #[test]
     fn prefix_openrouter_is_idempotent_and_required() {
-        assert_eq!(prefix_openrouter("moonshotai/kimi-k2.6"), "openrouter/moonshotai/kimi-k2.6");
+        assert_eq!(
+            prefix_openrouter("moonshotai/kimi-k2.6"),
+            "openrouter/moonshotai/kimi-k2.6"
+        );
         assert_eq!(
             prefix_openrouter("openrouter/moonshotai/kimi-k2.6"),
             "openrouter/moonshotai/kimi-k2.6",
             "already-prefixed values pass through untouched"
         );
-        assert_eq!(prefix_openrouter("  qwen/qwen3.5-flash-02-23  "), "openrouter/qwen/qwen3.5-flash-02-23");
+        assert_eq!(
+            prefix_openrouter("  qwen/qwen3.5-flash-02-23  "),
+            "openrouter/qwen/qwen3.5-flash-02-23"
+        );
     }
 
     #[test]
@@ -541,8 +534,7 @@ TELEGRAM_BOT_TOKEN=tg
         let (main_a, aux_a) = catalog_defaults("anthropic").expect("anthropic in catalog");
         assert!(main_a.starts_with("claude-"));
         assert!(aux_a.starts_with("claude-"));
-        let (main_or, _aux_or) =
-            catalog_defaults("openrouter").expect("openrouter in catalog");
+        let (main_or, _aux_or) = catalog_defaults("openrouter").expect("openrouter in catalog");
         assert!(main_or.starts_with("openrouter/"));
         // Unknown provider — caller should fall back to "leave alone".
         assert!(catalog_defaults("nonsense-provider").is_none());

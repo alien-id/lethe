@@ -78,11 +78,18 @@ fn active_tool_specs_start_small_and_expand_on_request() {
         "note_create",
         "memory_complete",
     ] {
-        assert!(!initial.contains(&moved.to_string()), "{moved} should be requestable");
+        assert!(
+            !initial.contains(&moved.to_string()),
+            "{moved} should be requestable"
+        );
     }
     // Top-level (non-subagent) turn keeps a lean initial set; with the 3
     // Transport tools added when Telegram is connected this stays <= 15.
-    assert!(initial.len() <= 12, "initial tool set too large: {}", initial.len());
+    assert!(
+        initial.len() <= 12,
+        "initial tool set too large: {}",
+        initial.len()
+    );
 
     let active = ["browser_open".to_string(), "fetch_webpage".to_string()]
         .into_iter()

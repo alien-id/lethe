@@ -393,9 +393,9 @@ fn embedded_meta(name: &str) -> Option<&'static str> {
     match name {
         "identity" => Some(include_str!("../../config/blocks/identity.meta.json")),
         "human" => Some(include_str!("../../config/blocks/human.meta.json")),
-        "conversation_summary" => {
-            Some(include_str!("../../config/blocks/conversation_summary.meta.json"))
-        }
+        "conversation_summary" => Some(include_str!(
+            "../../config/blocks/conversation_summary.meta.json"
+        )),
         _ => None,
     }
 }
