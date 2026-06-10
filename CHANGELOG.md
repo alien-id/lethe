@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.22.18 - Long-horizon autonomy
+
+- **Subagent state survives restarts.** Every actor mutation is snapshotted to an
+  `actors` table in the unified memory DB; on startup, unfinished subagents are
+  rehydrated with their goals, task state, turn budget, and last checkpoint,
+  re-parented to the live principal, and woken to continue. A deploy, crash, or
+  self-restart now interrupts work instead of erasing it.
+- **The heartbeat sees unfinished work.** The idle gate only skips a tick when
+  there are no due reminders *and* no open work; heartbeat prompts carry an
+  open-work digest — unfinished subagents (including blocked ones, which never
+  autocontinue on their own), in-progress and overdue todos — with instructions
+  to act on each item. Previously a blocked subagent could sit invisible for days.
+- **Turn caps produce checkpoints, not truncated answers.** Hitting the tool
+  budget forces a structured GOAL/DONE/REMAINING/NEXT checkpoint; subagents see
+  their own previous turn each iteration; a subagent that runs out of turns hands
+  its checkpoint to its parent for a successor. The compaction-summary race is
+  closed: the next turn waits (bounded) for the previous turn's summary update.
+- **Todos are the work queue.** In-progress and overdue todos are injected into
+  every system prompt as `<active_tasks>`, and todos support `parent_id` subtasks
+  (in-place schema migration, agent tools, CLI).
+- **Smarter circuit breakers, no dropped signals.** Transient tool errors
+  (timeout/429/5xx/network) weigh half a permanent error; the repeated-call
+  breaker requires identical call *and* result, so polling that observes progress
+  survives; rate-limited proactive messages defer to an outbox and re-deliver on
+  a later tick (6h TTL) instead of being silently discarded.
+
 ## 0.22.17 - Non-blocking post-turn memory maintenance
 
 - **The reply no longer waits on post-turn memory work.** The conversation-summary
