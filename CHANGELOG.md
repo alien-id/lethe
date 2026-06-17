@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.22.21 - Multi-byte streaming fix
+
+- **Streamed replies in non-Latin scripts no longer abort mid-turn.** The
+  vendored genai `WebStream` decoded each network chunk with `String::from_utf8`
+  in isolation, so a multi-byte character (Cyrillic, accented Latin, emoji, …)
+  split across two chunk boundaries failed to decode and aborted the whole
+  stream with `LLM streaming chat request failed`. It now buffers an incomplete
+  trailing UTF-8 sequence and prepends it to the next chunk, decoding only the
+  validated prefix; genuinely malformed bytes still error as before.
+  Heavy-Cyrillic conversations — which split a character on most turns — were
+  effectively unusable.
+
 ## 0.22.20 - Streaming truncation fix
 
 - **Streamed replies no longer lose their final tokens.** vLLM-based providers
