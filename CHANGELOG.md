@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.22.22 - Knowledge-graph agent tools
+
+- **The agent can query and curate the user's knowledge graph.** New `kg_search`,
+  `kg_get`, `kg_add`, `kg_delete`, `kg_merge`, and `kg_set_notes` tools call the
+  hosted `/kg` API over the entities (people, places, companies) extracted from
+  conversations. They are backed by `KG_API_BASE` + `KG_API_TOKEN` injected by
+  the hosted supervisor; a new `ToolCategory::KnowledgeGraph` hides them entirely
+  when unconfigured, so self-hosted installs without a graph backend are
+  unaffected.
+
 ## 0.22.21 - Multi-byte streaming fix
 
 - **Streamed replies in non-Latin scripts no longer abort mid-turn.** The
