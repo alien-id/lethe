@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.22.23 - Telegram voice transcription on OpenRouter
+
+- **Voice messages from Telegram transcribe again.** In the hosted setup the
+  agent container reaches the LLM only through the metering proxy, so the old
+  provider auto-selection picked OpenAI and POSTed to `api.openai.com` with the
+  per-user proxy token (not a valid OpenAI key) — every voice note failed.
+  Transcription now selects OpenRouter whenever `LLM_API_BASE` is set and POSTs
+  to `{LLM_API_BASE}/audio/transcriptions` (the proxy forwards it upstream with
+  the real key), using the proxy token from `OPENAI_API_KEY` when no dedicated
+  `OPENROUTER_API_KEY` is present. The default OpenRouter STT model is now
+  `openai/whisper-large-v3` (`whisper-1` isn't served by OpenRouter). A direct
+  OpenRouter endpoint is still used when `LLM_API_BASE` is unset.
+
 ## 0.22.22 - Knowledge-graph agent tools
 
 - **The agent can query and curate the user's knowledge graph.** New `kg_search`,
