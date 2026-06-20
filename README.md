@@ -245,6 +245,7 @@ Configuration is read from process environment, a local `.env`, and `$LETHE_HOME
 | `OPENAI_AUTH_TOKEN` | Optional OpenAI OAuth access token (raw) | unset |
 | `LETHE_OPENAI_OAUTH_TOKENS` | Optional OpenAI OAuth token file | `$CREDENTIALS_DIR/openai_oauth_tokens.json` |
 | `OPENCODE_GO_API_KEY` | OpenCode Go key | unset |
+| `MISTRAL_API_KEY` | Mistral key — Voxtral transcription only (not the chat LLM) | unset |
 | `EXA_API_KEY` | Exa search/fetch tools | unset |
 | `LETHE_SEMANTIC_SEARCH_ENABLED` | Enable vector recall (fallback is keyword search) | `true` |
 | `LETHE_EMBEDDING_PROVIDER` | `fastembed` or `hash` | `fastembed` |
@@ -256,7 +257,7 @@ Configuration is read from process environment, a local `.env`, and `$LETHE_HOME
 | `HEARTBEAT_INTERVAL` | Heartbeat interval seconds | `3600` |
 | `PROACTIVE_MAX_PER_DAY` | Proactive message daily limit | `4` |
 | `PROACTIVE_COOLDOWN_MINUTES` | Minimum spacing for proactive messages | `60` |
-| `TRANSCRIPTION_PROVIDER` | `auto`, `openrouter`, `openai`, or `local` | `auto` |
+| `TRANSCRIPTION_PROVIDER` | `auto`, `openrouter`, `openai`, `mistral`, or `local` | `auto` |
 | `TRANSCRIPTION_MODEL` | STT model override | provider default |
 | `TRANSCRIPTION_LANGUAGE` | Optional language hint | auto |
 | `TRANSCRIPTION_LOCAL_COMMAND` | Local Whisper command | `whisper` |
