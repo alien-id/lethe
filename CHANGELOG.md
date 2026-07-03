@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.23.1 - Secure-form guidance fixes
+
+- **The agent no longer invents a phone-app step for vault credential entry.**
+  The `vault_add` / `vault_set_totp` tool descriptions now state where the
+  secure form actually appears — a credential card right in the hosted chat UI,
+  or a local browser form — and that no phone or external app is involved (the
+  "Alien app" wording belongs only to the separate owner-binding deep-link
+  flow). `vault_list` now also states that a listed credential has its secret
+  fields stored, so null bookkeeping metadata (`lastUsedAt`) is no longer
+  misread as "credentials not filled in yet".
+
 ## 0.23.0 - Alien agent identity, vault, and sealed browser
 
 - **Each Lethe instance can now hold its own Alien agent identity.** New
