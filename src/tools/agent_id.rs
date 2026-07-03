@@ -448,14 +448,14 @@ pub const TOOL_DEFS: &[ToolDef] = &[
     },
     ToolDef {
         name: "vault_list",
-        description: "List credentials in the Alien vault — names, types, domains, and access level only (never secret values).",
+        description: "List credentials in the Alien vault — names, types, domains, and access level only (never secret values). A credential listed here HAS its secret fields stored; null bookkeeping metadata (e.g. lastUsedAt) does NOT mean it is unfilled.",
         params: &[],
         category: ToolCategory::AgentId,
         execute: ToolExecutor::Async(exec_vault_list),
     },
     ToolDef {
         name: "vault_add",
-        description: "Store a credential in the Alien vault. You supply only name/type/domains/access; the owner types the secret values into a secure form (they never reach you or this conversation). Types: bearer, basic, header, query, cookie, oauth2, login, totp.",
+        description: "Store a credential in the Alien vault. You supply only name/type/domains/access; the owner types the secret values into a secure form that appears AUTOMATICALLY — in the hosted chat it is a credential card shown right in this conversation's UI; locally it is a browser form on the owner's machine. No phone or external app is involved; never direct the owner elsewhere. The values never reach you or this conversation, and an ok result means the credential IS fully stored, secrets included. Types: bearer, basic, header, query, cookie, oauth2, login, totp.",
         params: &[
             p_str_req("name", "Credential name (letters, digits, dot/dash/underscore)."),
             p_enum("type", "Credential type.", &["bearer", "basic", "header", "query", "cookie", "oauth2", "login", "totp"]),
@@ -475,7 +475,7 @@ pub const TOOL_DEFS: &[ToolDef] = &[
     },
     ToolDef {
         name: "vault_set_totp",
-        description: "Attach a 2FA/TOTP seed to a login or totp credential so logins can generate codes automatically. The owner types the seed into a secure form; it never reaches you. Only useful where a browser session can consume it.",
+        description: "Attach a 2FA/TOTP seed to a login or totp credential so logins can generate codes automatically. The owner types the seed into a secure form that appears automatically (hosted: a card in this chat; locally: a browser form) — no phone or external app is involved; it never reaches you. Only useful where a browser session can consume it.",
         params: &[p_str_req("name", "Credential name to attach the TOTP seed to.")],
         category: ToolCategory::AgentIdBrowser,
         execute: ToolExecutor::Async(exec_vault_set_totp),
