@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.23.3 - Secure credential card: no phantom "open the app"
+
+- **After you save a credential, the agent knows the secret is already in.**
+  Saving a credential pops a secure card **in the chat** and the tool call blocks
+  until you submit it — so a successful save already means "filled". The result
+  now says so explicitly, which stops the agent from telling you to "open the
+  Alien app and fill it in, then say done" (there is no app step; the card is
+  right in the conversation, and 2FA works the same way).
+
 ## 0.23.2 - Headless browser flow works end-to-end
 
 - **The vault-sealed browser is usable from a stored login.** `vault_add` now
