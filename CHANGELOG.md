@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.23.2 - Headless browser flow works end-to-end
+
+- **The vault-sealed browser is usable from a stored login.** `vault_add` now
+  takes a `login_url` for `login` credentials — without it
+  `alien_browser_auto_login` had nowhere to start, so no signed-in
+  browser-profile could ever be sealed and every later `alien_browser_open`
+  failed with "no browser-profile".
+- **Browser-daemon errors are legible.** A daemon that exits before serving
+  (no profile yet, a bad login URL, a launch failure) now surfaces its actual
+  message instead of a generic "did not report ready" timeout, so a benign
+  "run auto-login first" state no longer reads as "the browser is crashing / not
+  installed". The `alien_browser_open` / `auto_login` tool descriptions also
+  spell out the order: auto-login seals a profile first, open reuses it.
+
 ## 0.23.1 - Secure-form guidance fixes
 
 - **The agent no longer invents a phone-app step for vault credential entry.**

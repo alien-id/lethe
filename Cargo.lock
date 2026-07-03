@@ -2190,7 +2190,7 @@ checksum = "7a79a3332a6609480d7d0c9eab957bca6b455b91bb84e66d19f5ff66294b85b8"
 
 [[package]]
 name = "lethe"
-version = "0.23.1"
+version = "0.23.2"
 dependencies = [
  "aes-gcm",
  "anyhow",
