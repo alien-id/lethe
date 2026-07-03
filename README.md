@@ -120,7 +120,8 @@ cargo test
 cargo build --release
 ```
 
-Browser automation uses the external `agent-browser` CLI when browser tools are called.
+Browser automation uses the external `agent-id-browser` CLI (the vault-sealed
+browser) when browser tools are called — see [Alien agent-id](#alien-agent-id).
 
 ## Running
 
@@ -364,33 +365,62 @@ SSE event vocabulary on `/chat` and `/events`:
 
 Each Lethe instance can carry its own **Alien agent identity** (Ed25519, L0
 self-asserted out of the box; optionally bound to a human owner via the Alien app
-for L1/L2 assurance) and an **encrypted credential vault**, and — locally — drive a
-**vault-sealed browser**. These are provided by the
-[`agent-id`](https://github.com/…) CLIs (`agent-id-core`, `agent-id-vault`,
-`agent-id-browser`); Lethe shells out to them.
+for L1/L2 assurance) and an **encrypted credential vault**, and drive a
+**vault-sealed browser** (headless on a server or in a container, headed when a
+display is available). These are provided by the
+[`agent-id`](https://github.com/alien-id/agent-id) CLIs (`agent-id-core`,
+`agent-id-vault`, `agent-id-browser`); Lethe shells out to them.
 
-Enable by installing the CLIs so they're on `PATH`:
+Enable identity + vault by installing the two published CLIs so they're on `PATH`:
 
 ```bash
 npm i -g @alien-id/agent-id-core @alien-id/agent-id-vault   # identity + vault
-# agent-id-browser is marketplace-only; point AGENT_ID_BROWSER_BIN at it to enable browser tools
 ```
 
 `lethe init` provisions an L0 identity + vault automatically when the CLIs are
 present; the daemon re-provisions on start. State is isolated per instance under
 `AGENT_ID_STATE_DIR` (default `<LETHE_HOME>/agent-id`).
 
+### Browser tools (optional)
+
+The vault-sealed browser adds the `alien_browser_*` tools. `agent-id-browser` is
+**marketplace-only — not on npm**; install it from the plugin tarball and point
+`AGENT_ID_BROWSER_BIN` at it (or put it on `PATH`). It drives **real Google
+Chrome** via `channel:"chrome"` (a stealth-tuned patchright launch — not bundled
+Chromium), so the host needs Chrome installed:
+
+```bash
+# From a checkout of github.com/alien-id/agent-id:
+( cd plugins/agent-id-browser && bun pm pack --destination /tmp )   # -> /tmp/alien-id-agent-id-browser-*.tgz
+npm i -g /tmp/alien-id-agent-id-browser-*.tgz    # pulls core/vault + patchright
+# …and install Google Chrome (google-chrome-stable) on the host.
+```
+
+Chrome refuses to run as **root** with its sandbox on. In a container that runs as
+root (the container is the isolation boundary), set
+`AGENT_ID_BROWSER_NO_SANDBOX=1`; leave it unset on a normal desktop so the sandbox
+stays on. Headed login (`alien_browser_login`) needs a display and is therefore
+unavailable on a headless server — there, use the headless flow below.
+
+**Headless login flow:** add a `login` credential *with a `login_url`* (via
+`vault_add`), then `alien_browser_auto_login` to sign in and seal a reusable
+browser-profile, then `alien_browser_open` / `_act` to drive it. `open` before a
+profile exists reports "no browser-profile" — that means run `auto_login` first.
+(A site with an aggressive anti-automation wall may block headless login; that
+needs a one-time headed sign-in on a machine with a display.)
+
 | env var | default | meaning |
 |---|---|---|
 | `AGENT_ID_ENABLED` | `true` | Master switch for the integration. |
 | `AGENT_ID_STATE_DIR` | `<LETHE_HOME>/agent-id` | Per-instance identity + vault state. |
 | `AGENT_ID_CORE_BIN` / `AGENT_ID_VAULT_BIN` / `AGENT_ID_BROWSER_BIN` | discovered on `PATH` | Override CLI locations. |
+| `AGENT_ID_BROWSER_NO_SANDBOX` | unset | Set `1` to keep Chrome's `--no-sandbox` (required when running as root, e.g. in a container). |
 | `ALIEN_PROVIDER_ADDRESS` | — | Alien SSO provider for `agent_id_bind`. |
 | `LETHE_SECURE_PROMPT` | `off` | `hosted` runs the secure-input socket server (set by lethe-hosted). |
 
 Tools (requested on demand): `agent_id_status`, `agent_id_bind`, `agent_id_sign`,
-`vault_list`, `vault_add`, `vault_remove`, `vault_set_totp`, and the local browser
-tools `alien_browser_login` / `_auto_login` / `_open` / `_close` / `_act` /
+`vault_list`, `vault_add`, `vault_remove`, `vault_set_totp`, and the browser tools
+`alien_browser_login` / `_auto_login` / `_open` / `_close` / `_act` /
 `_fill_secret` / `_fill_otp`.
 
 ### Security model
