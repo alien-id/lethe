@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.23.0 - Alien agent identity, vault, and sealed browser
+
+- **Each Lethe instance can now hold its own Alien agent identity.** New
+  `agent_id_status`/`bind`/`sign` tools provision an Ed25519 identity (L0
+  self-asserted, optional owner binding via the Alien Network), backed by the
+  `agent-id-core` CLI — gated on discovery, so installs without the CLIs are
+  unaffected.
+- **Encrypted credential vault.** `vault_list`/`add`/`remove`/`set_totp` manage
+  credentials in an encrypted Alien Vault. Secrets never enter the model's
+  context: there is deliberately no `vault_show` and no generic `vault_exec`.
+- **Vault-sealed browser (local).** `alien_browser_login`/`auto_login`/`open`/
+  `close`/`act`/`fill_secret`/`fill_otp` drive a stealth browser whose profile
+  is sealed in the vault; credentials are typed into pages by the vault process,
+  never surfaced to the agent.
+- **Hosted secure-input channel.** In the hosted setup, human-typed secrets are
+  end-to-end sealed in the user's browser (ECDH-P256 → HKDF-SHA256 →
+  AES-256-GCM, request id + server key bound as AAD) and relayed as ciphertext
+  only; the collecting Lethe verifies the requesting child over a unix socket
+  with an SO_PEERCRED peer-PID allowlist, so a prompt-injected agent cannot
+  forge a credential card to harvest a secret.
+
 ## 0.22.23 - Telegram voice transcription on OpenRouter
 
 - **Voice messages from Telegram transcribe again.** In the hosted setup the
