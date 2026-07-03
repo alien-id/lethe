@@ -1,5 +1,6 @@
 //! Alien agent-id tools: cryptographic identity, the encrypted credential vault,
-//! and (locally) the vault-sealed browser.
+//! and the vault-sealed browser (headless in a container/server, headed with a
+//! display).
 //!
 //! These shell out to the agent-id CLIs via `crate::agent_id::cli`. Secrets never
 //! transit the model: the vault tools take and return metadata only (there is no
@@ -30,6 +31,39 @@ fn err(message: impl Into<String>) -> String {
 
 fn hub_of<'a>(registry: &'a ToolRegistry<'a>) -> Option<&'a SecurePromptHub> {
     registry.runtime.secure_prompt.as_ref()
+}
+
+/// A secure-form credential write BLOCKS until the owner types and submits the
+/// values, so an `ok` result means the fill already happened. Fold that fact into
+/// the result as a `note`: without it the model reads `{ok:true}` as "I made an
+/// empty slot" and — pulled by the strong "Alien" → Alien-app prior — tells the
+/// owner to go fill it in an app and report back, when the card was right here in
+/// the chat (hosted) or a browser form on their machine (local) and is already
+/// done. `hosted` picks the surface named in the note.
+fn note_secret_collected(result: String, hosted: bool) -> String {
+    let Ok(mut value) = serde_json::from_str::<Value>(&result) else {
+        return result;
+    };
+    if value.get("ok").and_then(Value::as_bool) != Some(true) {
+        return result; // an error result — nothing was collected
+    }
+    let surface = if hosted {
+        "the secure card shown in THIS chat"
+    } else {
+        "the secure browser form on their machine"
+    };
+    if let Some(obj) = value.as_object_mut() {
+        obj.insert(
+            "note".to_string(),
+            json!(format!(
+                "The owner has already entered and submitted the secret value(s) via {surface}; \
+                 this credential is now fully stored, secrets included. Do NOT tell them to open \
+                 an app or fill anything in elsewhere, and do NOT wait for them to confirm — the \
+                 submission already happened. Continue with the task."
+            )),
+        );
+    }
+    value.to_string()
 }
 
 /// Run a fast subcommand and return its JSON as the tool string.
@@ -226,7 +260,8 @@ fn exec_vault_add<'a>(r: &'a ToolRegistry<'a>, args: &'a Value) -> BoxFuture<'a>
             argv.push("--login-url".to_string());
             argv.push(login_url);
         }
-        interactive(Bin::Vault, &sd, &argv, hub_of(r)).await
+        let hosted = hub_of(r).is_some();
+        note_secret_collected(interactive(Bin::Vault, &sd, &argv, hub_of(r)).await, hosted)
     })
 }
 
@@ -252,7 +287,8 @@ fn exec_vault_set_totp<'a>(r: &'a ToolRegistry<'a>, args: &'a Value) -> BoxFutur
             name,
             "--form".to_string(),
         ];
-        interactive(Bin::Vault, &sd, &argv, hub_of(r)).await
+        let hosted = hub_of(r).is_some();
+        note_secret_collected(interactive(Bin::Vault, &sd, &argv, hub_of(r)).await, hosted)
     })
 }
 
@@ -461,7 +497,7 @@ pub const TOOL_DEFS: &[ToolDef] = &[
     },
     ToolDef {
         name: "vault_add",
-        description: "Store a credential in the Alien vault. You supply only name/type/domains/access; the owner types the secret values into a secure form that appears AUTOMATICALLY — in the hosted chat it is a credential card shown right in this conversation's UI; locally it is a browser form on the owner's machine. No phone or external app is involved; never direct the owner elsewhere. The values never reach you or this conversation, and an ok result means the credential IS fully stored, secrets included. Types: bearer, basic, header, query, cookie, oauth2, login, totp.",
+        description: "Store a credential in the Alien vault. You supply only name/type/domains/access; the owner types the secret values into a secure form that appears AUTOMATICALLY — in the hosted chat it is a credential card shown right in this conversation's UI; locally it is a browser form on the owner's machine. No phone or external app is involved; never direct the owner elsewhere. This call BLOCKS until the owner submits that form and returns only AFTER they have — so an ok result means the values are already entered and the credential is fully stored. Do not ask the owner to fill anything in or to report back; just continue. The values never reach you or this conversation. Types: bearer, basic, header, query, cookie, oauth2, login, totp.",
         params: &[
             p_str_req("name", "Credential name (letters, digits, dot/dash/underscore)."),
             p_enum("type", "Credential type.", &["bearer", "basic", "header", "query", "cookie", "oauth2", "login", "totp"]),
@@ -561,3 +597,41 @@ pub const TOOL_DEFS: &[ToolDef] = &[
         execute: ToolExecutor::Async(exec_browser_fill_otp),
     },
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::note_secret_collected;
+    use serde_json::Value;
+
+    #[test]
+    fn ok_result_gets_a_submission_note() {
+        let out = note_secret_collected(r#"{"ok":true,"name":"LinkedIn"}"#.to_string(), true);
+        let v: Value = serde_json::from_str(&out).unwrap();
+        let note = v.get("note").and_then(Value::as_str).unwrap();
+        assert!(note.contains("THIS chat"), "hosted note names the in-chat card");
+        assert!(note.contains("already"), "note states the fill already happened");
+        assert!(
+            note.contains("Do NOT tell them to open"),
+            "note forbids the go-to-an-app instruction",
+        );
+        // The original fields survive.
+        assert_eq!(v.get("name").and_then(Value::as_str), Some("LinkedIn"));
+    }
+
+    #[test]
+    fn local_mode_names_the_browser_form_not_a_chat_card() {
+        let out = note_secret_collected(r#"{"ok":true}"#.to_string(), false);
+        let v: Value = serde_json::from_str(&out).unwrap();
+        let note = v.get("note").and_then(Value::as_str).unwrap();
+        assert!(note.contains("browser form"), "local note names the browser form");
+        assert!(!note.contains("THIS chat"));
+    }
+
+    #[test]
+    fn error_result_is_left_untouched() {
+        let src = r#"{"ok":false,"error":"boom"}"#;
+        assert_eq!(note_secret_collected(src.to_string(), true), src);
+        // Non-JSON passes through verbatim too.
+        assert_eq!(note_secret_collected("not json".to_string(), true), "not json");
+    }
+}
