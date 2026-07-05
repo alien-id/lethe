@@ -48,6 +48,9 @@ pub enum ParamKind {
     Bool,
     StringArray,
     Enum(&'static [&'static str]),
+    /// Free-form JSON object (schema allows arbitrary keys). Used for flag
+    /// pass-through params like `alien_browser_act.params`.
+    Object,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -130,6 +133,11 @@ fn param_schema(param: &ParamSpec) -> Value {
             "description": param.description,
             "enum": values.iter().collect::<Vec<_>>(),
         }),
+        ParamKind::Object => json!({
+            "type": "object",
+            "description": param.description,
+            "additionalProperties": true,
+        }),
     }
 }
 
@@ -173,6 +181,15 @@ pub const fn p_bool(name: &'static str, description: &'static str) -> ParamSpec 
     ParamSpec {
         name,
         kind: ParamKind::Bool,
+        description,
+        required: false,
+    }
+}
+
+pub const fn p_obj(name: &'static str, description: &'static str) -> ParamSpec {
+    ParamSpec {
+        name,
+        kind: ParamKind::Object,
         description,
         required: false,
     }

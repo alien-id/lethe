@@ -20,7 +20,7 @@ use crate::agent_id::secure_prompt::SecurePromptHub;
 use crate::tools::registry::ToolRegistry;
 use crate::tools::registry::args::{bool_arg, nonempty_string, string_arg, string_vec_arg};
 use crate::tools::spec::{
-    ToolCategory, ToolDef, ToolExecutor, p_bool, p_enum, p_str, p_str_array, p_str_req,
+    ToolCategory, ToolDef, ToolExecutor, p_bool, p_enum, p_obj, p_str, p_str_array, p_str_req,
 };
 
 type BoxFuture<'a> = Pin<Box<dyn Future<Output = String> + Send + 'a>>;
@@ -567,7 +567,11 @@ pub const TOOL_DEFS: &[ToolDef] = &[
         name: "alien_browser_act",
         description: "Run a browser action in an open session. `action` is a verb (snapshot, click, type, navigate, page-text, wait, tabs, tab-new, screenshot, get, scroll, press, …) and `params` its flags (e.g. {\"ref\":\"e3\",\"text\":\"hi\"}). For credential injection use the dedicated fill tools.",
         params: &[
-            p_str_req("action", "Browser verb to run."),
+            p_str_req("action", "Browser verb to run (bare verb only — flags go in `params`)."),
+            p_obj(
+                "params",
+                "Flags for the verb as key/value pairs, e.g. {\"url\": \"https://example.com\"} for navigate or {\"ref\": \"e3\", \"text\": \"hi\"} for type. `true` becomes a bare flag, arrays are comma-joined.",
+            ),
             p_str("name", "Session name (default 'main')."),
         ],
         category: ToolCategory::AgentIdBrowser,
