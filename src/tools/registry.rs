@@ -151,6 +151,32 @@ impl<'a> ToolRegistry<'a> {
     pub fn requestable_tools_directory(&self) -> String {
         requestable_tools_directory_for(&self.runtime)
     }
+
+    /// Tool families that form a single workflow (the vault-sealed browser's
+    /// open/act/close/fill set, the agent-id identity+vault set, the built-in
+    /// browser): requesting any member should load the whole family, so the
+    /// model doesn't stall mid-flow on an "available but not loaded" sibling.
+    pub fn group_siblings(&self, name: &str) -> Vec<String> {
+        use crate::tools::spec::ToolCategory;
+        let name = name.trim();
+        let Some(def) = find_def(name) else {
+            return Vec::new();
+        };
+        if !matches!(
+            def.category,
+            ToolCategory::AgentId | ToolCategory::AgentIdBrowser | ToolCategory::BrowserBuiltin
+        ) {
+            return Vec::new();
+        }
+        let mut names = catalog::all_defs()
+            .filter(|sibling| sibling.category == def.category && self.def_is_visible(sibling))
+            .map(|sibling| sibling.name.to_string())
+            .filter(|sibling| sibling != name)
+            .collect::<Vec<_>>();
+        names.sort();
+        names.dedup();
+        names
+    }
 }
 
 /// Shape inputs for [`requestable_tools_directory_for_shape`]. Lets callers

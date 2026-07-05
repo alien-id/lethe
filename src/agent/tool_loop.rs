@@ -873,7 +873,17 @@ fn request_tool_for_turn(
         return format!("Tool '{name}' is already available. You can use it now.");
     }
     active_tools.insert(name.to_string());
-    format!("Tool '{name}' is now available. You can use it in the next tool call.")
+    let siblings = registry.group_siblings(name);
+    if siblings.is_empty() {
+        return format!("Tool '{name}' is now available. You can use it in the next tool call.");
+    }
+    for sibling in &siblings {
+        active_tools.insert(sibling.clone());
+    }
+    format!(
+        "Tool '{name}' is now available, together with its whole family: {}. You can use them from the next tool call on without further request_tool calls.",
+        siblings.join(", ")
+    )
 }
 
 fn truncate_log_text(value: &str, limit: usize) -> String {
