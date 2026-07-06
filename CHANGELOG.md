@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.23.5 - Tool-family loading, browser-act schema, client chat egress
+
+- **Requesting one tool now loads its whole family.** The vault/identity tools,
+  the vault-sealed browser set, and the built-in browser are each one workflow
+  (open/act/close, add/list/remove). Loading them one at a time made real flows
+  stall mid-turn on "available but not loaded" (`alien_browser_close` / `_login`
+  bounced right after `_act` loaded). `request_tool` on any member now activates
+  the whole visible family, and says so in its result.
+- **`alien_browser_act` params are in the schema.** The executor already turned a
+  `params` object into `--flags`, but the declared schema only had `action`/`name`
+  (with `additionalProperties:false`), so schema-strict models couldn't pass a URL
+  to navigate or a ref to click. Added `ParamKind::Object` and declared `params`.
+- **Telegram tools split from client chat egress.** `telegram_send_message`/etc.
+  were gated on *any* transport, so API/desktop/hosted-web sessions carried
+  Telegram-branded tools with no Telegram configured (and `_send_file`/`_react`
+  silently no-op'd in those chat UIs). Client sessions now get a transport-neutral
+  `chat_send_message`; Telegram sessions keep the branded set.
+- **Owner-binding QR renders in GUI chats.** The bind result now tells the model
+  to present `deep_link` as a ` ```qr ` fenced block (GUI chats render those as
+  real scannable codes) instead of pasting terminal box-drawing `qr_code`, which
+  is unscannable in a proportional-font chat.
+
 ## 0.23.4 - One browser at a time
 
 - **No more two competing browsers.** Lethe has a built-in browser (`browser_*`,
