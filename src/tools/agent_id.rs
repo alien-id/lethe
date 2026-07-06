@@ -130,7 +130,7 @@ fn exec_agent_id_bind<'a>(r: &'a ToolRegistry<'a>, args: &'a Value) -> BoxFuture
                 "ok": true,
                 "resumed": true,
                 "deep_link": pending.get("deepLink").cloned().unwrap_or(Value::Null),
-                "message": "Resuming a pending owner-binding — approve it in your Alien app. I'll confirm when it completes (or call agent_id_status).",
+                "message": "Resuming a pending owner-binding — approve it in your Alien app. I'll confirm when it completes (or call agent_id_status). In a markdown chat, show deep_link inside a ```qr fenced code block (the UI renders it as a scannable QR) plus as a plain link.",
             })
             .to_string();
         }
@@ -160,7 +160,7 @@ fn exec_agent_id_bind<'a>(r: &'a ToolRegistry<'a>, args: &'a Value) -> BoxFuture
             "deep_link": auth.get("deepLink").cloned().unwrap_or(Value::Null),
             "qr_code": auth.get("qrCode").cloned().unwrap_or(Value::Null),
             "expires_at": auth.get("expiredAt").cloned().unwrap_or(Value::Null),
-            "message": "Scan the QR (or open the deep link) in your Alien app to bind this agent to you. I'll confirm here when it completes, or call agent_id_status.",
+            "message": "Ask the owner to approve in their Alien app; I'll confirm here when it completes (or call agent_id_status). Presentation: in a markdown chat, show deep_link inside a ```qr fenced code block (the UI renders it as a scannable QR) plus as a plain link — qr_code is box-drawing art that is ONLY legible in a terminal, never paste it into markdown.",
         })
         .to_string()
     })
