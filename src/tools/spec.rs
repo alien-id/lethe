@@ -28,8 +28,13 @@ pub enum ToolCategory {
     Actor,
     /// Like `Actor`, but only when the actor is a subagent.
     ActorSubagent,
-    /// Initial when telegram or client transport context is attached.
+    /// Initial when the TELEGRAM transport context is attached. These tools
+    /// are Telegram-branded (keyboards, reactions) — a plain client/web chat
+    /// gets the neutral `TransportClient` set instead.
     Transport,
+    /// Initial when a client (web/desktop chat) transport context is attached
+    /// and telegram is not. Transport-neutral chat egress.
+    TransportClient,
     /// Initial when the hosted knowledge-graph backend is configured
     /// (KG_API_BASE/KG_API_TOKEN); hidden entirely otherwise.
     KnowledgeGraph,

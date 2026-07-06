@@ -351,6 +351,8 @@ fn exposes_and_executes_telegram_tools_when_context_is_present() {
     assert!(names.contains(&"telegram_send_message".to_string()));
     assert!(names.contains(&"telegram_send_file".to_string()));
     assert!(names.contains(&"telegram_react".to_string()));
+    // Telegram sessions keep the branded set; the neutral alias stays hidden.
+    assert!(!names.contains(&"chat_send_message".to_string()));
 
     let message_payload = registry.execute(
         "telegram_send_message",
@@ -424,12 +426,15 @@ fn client_tool_context_exposes_telegram_tools_as_events() {
         .into_iter()
         .map(|tool| tool.name)
         .collect::<Vec<_>>();
-    assert!(names.contains(&"telegram_send_message".to_string()));
-    assert!(names.contains(&"telegram_send_file".to_string()));
-    assert!(names.contains(&"telegram_react".to_string()));
+    // Client-only sessions get the transport-neutral chat egress, never the
+    // Telegram-branded tool set (a desktop/web user has no Telegram attached).
+    assert!(names.contains(&"chat_send_message".to_string()));
+    assert!(!names.contains(&"telegram_send_message".to_string()));
+    assert!(!names.contains(&"telegram_send_file".to_string()));
+    assert!(!names.contains(&"telegram_react".to_string()));
 
     let message_payload = registry.execute(
-        "telegram_send_message",
+        "chat_send_message",
         &json!({
             "text": "progress",
             "parse_mode": "markdown",

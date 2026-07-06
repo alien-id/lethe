@@ -53,10 +53,11 @@ const FREE_TOOL_NAMES: &[&str] = &[
     "conversation_search",
     "note_search",
     "note_get",
-    // Telegram
+    // Chat egress (Telegram-branded + the client-transport alias)
     "telegram_send_message",
     "telegram_send_file",
     "telegram_react",
+    "chat_send_message",
     // Actor lifecycle
     "send_message",
     "user_notify",

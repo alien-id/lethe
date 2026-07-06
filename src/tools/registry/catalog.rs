@@ -50,8 +50,9 @@ impl<'a> ToolRegistry<'a> {
                 .actor
                 .as_ref()
                 .is_some_and(|context| context.is_subagent),
-            ToolCategory::Transport => {
-                self.runtime.telegram.is_some() || self.runtime.client.is_some()
+            ToolCategory::Transport => self.runtime.telegram.is_some(),
+            ToolCategory::TransportClient => {
+                self.runtime.client.is_some() && self.runtime.telegram.is_none()
             }
             ToolCategory::KnowledgeGraph => knowledge_graph::is_configured(),
             ToolCategory::AgentId => crate::agent_id::vault_tools_available(),
@@ -75,8 +76,9 @@ impl<'a> ToolRegistry<'a> {
                 .actor
                 .as_ref()
                 .is_some_and(|context| context.is_subagent),
-            ToolCategory::Transport => {
-                self.runtime.telegram.is_some() || self.runtime.client.is_some()
+            ToolCategory::Transport => self.runtime.telegram.is_some(),
+            ToolCategory::TransportClient => {
+                self.runtime.client.is_some() && self.runtime.telegram.is_none()
             }
             ToolCategory::KnowledgeGraph => knowledge_graph::is_configured(),
             // Identity/vault/browser tools stay discoverable but are requested on

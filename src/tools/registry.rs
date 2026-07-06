@@ -188,7 +188,10 @@ impl<'a> ToolRegistry<'a> {
 pub struct ToolContextShape {
     pub has_actor: bool,
     pub is_subagent: bool,
-    pub has_transport: bool,
+    /// Telegram transport attached (Telegram-branded egress tools).
+    pub has_telegram: bool,
+    /// Client (web/desktop chat) transport attached (neutral chat egress).
+    pub has_client: bool,
 }
 
 pub fn requestable_tools_directory_for(runtime: &ToolRuntime) -> String {
@@ -198,7 +201,8 @@ pub fn requestable_tools_directory_for(runtime: &ToolRuntime) -> String {
             .actor
             .as_ref()
             .is_some_and(|context| context.is_subagent),
-        has_transport: runtime.telegram.is_some() || runtime.client.is_some(),
+        has_telegram: runtime.telegram.is_some(),
+        has_client: runtime.client.is_some(),
     })
 }
 
@@ -207,7 +211,8 @@ pub fn requestable_tools_directory_for_shape(shape: ToolContextShape) -> String 
     let ToolContextShape {
         has_actor,
         is_subagent,
-        has_transport,
+        has_telegram,
+        has_client,
     } = shape;
 
     let visible = |def: &crate::tools::spec::ToolDef| match def.category {
@@ -216,7 +221,8 @@ pub fn requestable_tools_directory_for_shape(shape: ToolContextShape) -> String 
         ToolCategory::BrowserBuiltin => !crate::agent_id::browser_tools_available(),
         ToolCategory::Actor => has_actor,
         ToolCategory::ActorSubagent => is_subagent,
-        ToolCategory::Transport => has_transport,
+        ToolCategory::Transport => has_telegram,
+        ToolCategory::TransportClient => has_client && !has_telegram,
         ToolCategory::KnowledgeGraph => crate::tools::knowledge_graph::is_configured(),
         ToolCategory::AgentId => crate::agent_id::vault_tools_available(),
         ToolCategory::AgentIdBrowser => crate::agent_id::browser_tools_available(),
@@ -227,7 +233,8 @@ pub fn requestable_tools_directory_for_shape(shape: ToolContextShape) -> String 
         ToolCategory::CortexOnly => !is_subagent,
         ToolCategory::Actor => has_actor,
         ToolCategory::ActorSubagent => is_subagent,
-        ToolCategory::Transport => has_transport,
+        ToolCategory::Transport => has_telegram,
+        ToolCategory::TransportClient => has_client && !has_telegram,
         ToolCategory::KnowledgeGraph => crate::tools::knowledge_graph::is_configured(),
         ToolCategory::AgentId | ToolCategory::AgentIdBrowser => false,
     };

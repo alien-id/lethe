@@ -12,7 +12,8 @@ fn requestable_directory_for_actor(actor: &Actor) -> String {
     requestable_tools_directory_for_shape(ToolContextShape {
         has_actor: true,
         is_subagent: !actor.is_principal,
-        has_transport: false,
+        has_telegram: false,
+        has_client: false,
     })
 }
 
