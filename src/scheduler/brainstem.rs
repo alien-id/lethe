@@ -237,6 +237,9 @@ fn emit_proactive(handle: &BrainstemHandle, limiter: &mut ProactiveRateLimiter, 
 }
 
 fn active_reminders(settings: &Settings) -> Result<String> {
+    if settings.hosted_plugins.replace_local_todos {
+        return Ok(String::new());
+    }
     let memory = crate::memory::MemoryStore::from_settings(settings)?;
     let todos = memory.todos.list(TodoFilter {
         include_completed: false,
@@ -257,6 +260,14 @@ fn active_reminders(settings: &Settings) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hosted_todo_replacement_suppresses_local_reminders() {
+        let mut settings =
+            crate::config::test_settings(std::path::Path::new("/tmp/lethe-hosted-reminder-test"));
+        settings.hosted_plugins.replace_local_todos = true;
+        assert_eq!(active_reminders(&settings).unwrap(), "");
+    }
 
     #[test]
     fn idle_gate_yields_to_open_work() {

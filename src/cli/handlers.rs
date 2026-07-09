@@ -543,11 +543,17 @@ fn heartbeat_config(settings: &Settings, minimal: bool) -> HeartbeatConfig {
 }
 
 pub(crate) fn open_work_text(settings: &Settings) -> Result<String> {
+    if settings.hosted_plugins.replace_local_todos {
+        return Ok(String::new());
+    }
     let memory = MemoryStore::from_settings(settings)?;
     Ok(memory.todos.open_work_digest(20)?)
 }
 
 pub(crate) fn active_reminders_text(settings: &Settings) -> Result<String> {
+    if settings.hosted_plugins.replace_local_todos {
+        return Ok(String::new());
+    }
     let memory = MemoryStore::from_settings(settings)?;
     let reminders = memory
         .todos
