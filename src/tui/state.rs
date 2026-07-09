@@ -52,10 +52,25 @@ pub struct TodoRow {
     pub due_date: Option<String>,
 }
 
+/// One insight/activity ledger row as rendered in the sidebar (fetched from
+/// `GET /activity`; newest first).
+#[derive(Clone, Debug)]
+pub struct ActivityUiRow {
+    pub id: i64,
+    pub kind: String,
+    pub title: String,
+    pub summary: String,
+    pub detail: Option<String>,
+    pub source_name: String,
+    pub produced_at: String,
+    pub seen: bool,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Pane {
     Transcript,
     Actors,
+    Activity,
     Todos,
     Editor,
 }
@@ -72,6 +87,14 @@ pub struct AppState {
     pub transcript: Vec<TranscriptItem>,
     pub actors: Vec<ActorRow>,
     pub todos: Vec<TodoRow>,
+    /// Persistent background-activity history, newest first.
+    pub activity: Vec<ActivityUiRow>,
+    /// Unseen-insight count behind the sidebar's green dot.
+    pub unseen_insights: u64,
+    /// Cursor into `activity` when the activity pane has focus.
+    pub activity_selected: usize,
+    /// Index into `activity` whose detail popup is open, if any.
+    pub activity_detail: Option<usize>,
     pub focused_pane: Pane,
     pub status: Status,
     pub model: String,
@@ -112,6 +135,10 @@ impl AppState {
             transcript: Vec::new(),
             actors: Vec::new(),
             todos: Vec::new(),
+            activity: Vec::new(),
+            unseen_insights: 0,
+            activity_selected: 0,
+            activity_detail: None,
             focused_pane: Pane::Editor,
             status: Status::Disconnected,
             model: String::from("(unknown)"),
@@ -236,6 +263,10 @@ impl AppState {
                 // Sidebar refresh is triggered by the driver after each
                 // actor event; the state itself is read via GET /actors.
             }
+            UiEvent::ActivityLogged => {
+                // Same pattern: the driver issues RefreshActivity; the
+                // rows and unseen count arrive via GET /activity.
+            }
             UiEvent::Usage { prompt_tokens } => self.prompt_tokens = Some(prompt_tokens),
             UiEvent::Reaction { .. } => {}
             UiEvent::Unknown { event, .. } => {
@@ -354,6 +385,55 @@ impl AppState {
         self.todos = todos.into_iter().filter_map(todo_from_json).collect();
     }
 
+    pub fn replace_activity(&mut self, activity: Vec<Value>) {
+        self.activity = activity.into_iter().filter_map(activity_from_json).collect();
+        if self.activity.is_empty() {
+            self.activity_selected = 0;
+            self.activity_detail = None;
+        } else {
+            self.activity_selected = self.activity_selected.min(self.activity.len() - 1);
+            self.activity_detail = self
+                .activity_detail
+                .filter(|index| *index < self.activity.len());
+        }
+    }
+
+    pub fn move_activity_selection(&mut self, down: bool) {
+        if self.activity.is_empty() {
+            return;
+        }
+        let last = self.activity.len() - 1;
+        self.activity_selected = if down {
+            (self.activity_selected + 1).min(last)
+        } else {
+            self.activity_selected.saturating_sub(1)
+        };
+    }
+
+    /// Open the detail popup for the selected row. Marks it seen locally and
+    /// returns its ledger id when this was its first viewing, so the caller
+    /// can persist the seen-state; `None` when there is nothing to persist.
+    pub fn open_activity_detail(&mut self) -> Option<i64> {
+        if self.activity.is_empty() {
+            return None;
+        }
+        let index = self.activity_selected.min(self.activity.len() - 1);
+        self.activity_detail = Some(index);
+        let row = &mut self.activity[index];
+        if row.seen {
+            return None;
+        }
+        row.seen = true;
+        if row.kind == "insight" {
+            self.unseen_insights = self.unseen_insights.saturating_sub(1);
+        }
+        Some(row.id)
+    }
+
+    pub fn close_activity_detail(&mut self) -> bool {
+        self.activity_detail.take().is_some()
+    }
+
     pub fn set_model(&mut self, model: impl Into<String>, provider: impl Into<String>) {
         self.model = model.into();
         self.provider = provider.into();
@@ -369,10 +449,46 @@ impl AppState {
             Pane::Editor => Pane::Transcript,
             Pane::Transcript if self.sidebar_visible => Pane::Actors,
             Pane::Transcript => Pane::Editor,
-            Pane::Actors => Pane::Todos,
+            Pane::Actors => Pane::Activity,
+            Pane::Activity => Pane::Todos,
             Pane::Todos => Pane::Editor,
         };
     }
+}
+
+fn activity_from_json(value: Value) -> Option<ActivityUiRow> {
+    Some(ActivityUiRow {
+        id: value.get("id")?.as_i64()?,
+        kind: value
+            .get("kind")
+            .and_then(Value::as_str)
+            .unwrap_or("activity")
+            .to_string(),
+        title: value.get("title")?.as_str()?.to_string(),
+        summary: value
+            .get("summary")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        detail: value
+            .get("detail")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        source_name: value
+            .get("source_name")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        produced_at: value
+            .get("produced_at")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        seen: value
+            .get("seen_at")
+            .map(|seen| !seen.is_null())
+            .unwrap_or(false),
+    })
 }
 
 fn actor_from_json(value: Value) -> Option<ActorRow> {

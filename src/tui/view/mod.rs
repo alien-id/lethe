@@ -9,7 +9,8 @@ pub mod transcript;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::widgets::{Block, Borders};
+use ratatui::text::{Line, Span, Text};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use tui_textarea::TextArea;
 
 use crate::tui::state::{AppState, Pane};
@@ -42,6 +43,76 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut AppState, editor: &TextArea<'_>) {
 
     editor::draw(frame, editor_area, app, editor);
     footer::draw(frame, footer_area, app);
+    draw_activity_detail(frame, size, app);
+}
+
+/// Centered popup with the selected activity's "what I did / what I found".
+/// Opened with Enter on an activity row; closed with Esc/Enter.
+fn draw_activity_detail(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
+    let Some(row) = app.activity_detail.and_then(|index| app.activity.get(index)) else {
+        return;
+    };
+    let width = area.width.saturating_sub(8).min(80).max(30);
+    let height = area.height.saturating_sub(6).min(20).max(8);
+    let popup = Rect {
+        x: area.width.saturating_sub(width) / 2,
+        y: area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    };
+
+    let kind_label = if row.kind == "insight" {
+        ("✦ insight", Color::Green)
+    } else {
+        ("▸ activity", Color::Blue)
+    };
+    let mut lines: Vec<Line<'static>> = vec![
+        Line::from(vec![
+            Span::styled(
+                kind_label.0.to_string(),
+                Style::default().fg(kind_label.1).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("  {} · {}", row.source_name, row.produced_at),
+                Style::default().fg(Color::Gray),
+            ),
+        ]),
+        Line::default(),
+        Line::from(Span::styled(
+            row.summary.clone(),
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
+    ];
+    if let Some(detail) = row
+        .detail
+        .as_deref()
+        .map(str::trim)
+        .filter(|detail| !detail.is_empty() && *detail != row.summary)
+    {
+        lines.push(Line::default());
+        for text_line in detail.lines() {
+            lines.push(Line::from(Span::raw(text_line.to_string())));
+        }
+    }
+    lines.push(Line::default());
+    lines.push(Line::from(Span::styled(
+        "Esc/Enter to close",
+        Style::default().fg(Color::DarkGray),
+    )));
+
+    frame.render_widget(Clear, popup);
+    let paragraph = Paragraph::new(Text::from(lines))
+        .wrap(Wrap { trim: false })
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Green))
+                .title(Span::styled(
+                    format!(" {} ", row.title),
+                    Style::default().add_modifier(Modifier::BOLD),
+                )),
+        );
+    frame.render_widget(paragraph, popup);
 }
 
 fn editor_height(editor: &TextArea<'_>, width: u16) -> u16 {

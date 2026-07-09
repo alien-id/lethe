@@ -1,5 +1,5 @@
-//! Right sidebar with Actors and Todos panels. Each panel is a vertical
-//! list; focus dictates the border color.
+//! Right sidebar with Actors, Activity, and Todos panels. Each panel is a
+//! vertical list; focus dictates the border color.
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
@@ -7,17 +7,22 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Paragraph, Wrap};
 
-use crate::tui::state::{ActorRow, AppState, Pane, TodoRow};
+use crate::tui::state::{ActivityUiRow, ActorRow, AppState, Pane, TodoRow};
 use crate::tui::view::{focus_border, inner_area};
 
 pub fn draw(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
     let layout = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
+        .constraints([
+            Constraint::Percentage(40),
+            Constraint::Percentage(30),
+            Constraint::Percentage(30),
+        ])
         .split(area);
 
     draw_actors(frame, layout[0], app);
-    draw_todos(frame, layout[1], app);
+    draw_activity(frame, layout[1], app);
+    draw_todos(frame, layout[2], app);
 }
 
 fn draw_actors(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
@@ -105,6 +110,97 @@ fn actor_line(actor: &ActorRow, indent: bool) -> Line<'static> {
 
 fn short_id(id: &str) -> String {
     id.chars().take(8).collect()
+}
+
+fn draw_activity(frame: &mut Frame<'_>, area: Rect, app: &AppState) {
+    // The green dot: unseen-insight count in the pane title, hidden at 0.
+    let mut title_spans = vec![Span::styled(
+        format!(" activity ({}) ", app.activity.len()),
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    )];
+    if app.unseen_insights > 0 {
+        title_spans.push(Span::styled(
+            format!("●{} ", app.unseen_insights),
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+    let block = focus_border(app, Pane::Activity).title(Line::from(title_spans));
+    let inner = inner_area(area);
+    frame.render_widget(block, area);
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    if app.activity.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "no background activity yet",
+            Style::default().fg(Color::Gray),
+        )));
+    } else {
+        let focused = app.focused_pane == Pane::Activity;
+        // Keep the selection visible in the pane's viewport.
+        let visible = inner.height as usize;
+        let start = if visible == 0 {
+            0
+        } else {
+            app.activity_selected.saturating_sub(visible.saturating_sub(1))
+        };
+        let mut last_day: Option<String> = None;
+        for (index, row) in app.activity.iter().enumerate().skip(start) {
+            // Group by day: a dim date line whenever the day changes
+            // (rows are newest-first, so days appear in reverse order).
+            let day: String = row.produced_at.chars().take(10).collect();
+            if last_day.as_deref() != Some(day.as_str()) && !day.is_empty() {
+                lines.push(Line::from(Span::styled(
+                    format!("— {day}"),
+                    Style::default().fg(Color::DarkGray),
+                )));
+                last_day = Some(day);
+            }
+            lines.push(activity_line(row, focused && index == app.activity_selected));
+        }
+    }
+    let paragraph = Paragraph::new(Text::from(lines)).wrap(Wrap { trim: false });
+    frame.render_widget(paragraph, inner);
+}
+
+fn activity_line(row: &ActivityUiRow, selected: bool) -> Line<'static> {
+    // Insight vs completed-task icon; unseen rows get the green dot + bold.
+    let icon = if row.kind == "insight" { "✦" } else { "▸" };
+    let icon_color = if row.kind == "insight" {
+        Color::Green
+    } else {
+        Color::Blue
+    };
+    let mut title_style = Style::default();
+    if !row.seen {
+        title_style = title_style.add_modifier(Modifier::BOLD);
+    }
+    if selected {
+        title_style = title_style.bg(Color::DarkGray);
+    }
+    let time: String = row
+        .produced_at
+        .chars()
+        .skip(11)
+        .take(5)
+        .collect::<String>();
+    let mut spans = vec![
+        Span::styled(format!("{icon} "), Style::default().fg(icon_color)),
+        Span::styled(row.title.clone(), title_style),
+    ];
+    if !row.seen {
+        spans.push(Span::styled(" ●", Style::default().fg(Color::Green)));
+    }
+    if !time.is_empty() {
+        spans.push(Span::styled(
+            format!(" {time}"),
+            Style::default().fg(Color::Gray),
+        ));
+    }
+    Line::from(spans)
 }
 
 fn draw_todos(frame: &mut Frame<'_>, area: Rect, app: &AppState) {

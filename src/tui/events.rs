@@ -34,6 +34,9 @@ pub enum UiEvent {
         actor_id: String,
         payload: Value,
     },
+    /// A new insight/activity ledger row was recorded; the sidebar refreshes
+    /// its activity list and unseen badge.
+    ActivityLogged,
     /// `Usage { prompt_tokens }` powers the footer's context indicator.
     Usage {
         prompt_tokens: u64,
@@ -56,6 +59,9 @@ pub enum AppCommand {
     Cancel,
     RefreshActors,
     RefreshTodos,
+    RefreshActivity,
+    /// Persist that the user viewed these ledger rows (detail opened).
+    MarkActivitySeen(Vec<i64>),
     SwitchModel(String),
     Quit,
 }

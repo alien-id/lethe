@@ -170,6 +170,9 @@ async fn drive(
                             tokio::time::Instant::now() + ACTOR_REFRESH_DEBOUNCE,
                         );
                     }
+                    if let UiEvent::ActivityLogged = &event {
+                        let _ = cmd_tx.try_send(AppCommand::RefreshActivity);
+                    }
                     if let UiEvent::ToolEnd { name, .. } = &event {
                         if name.starts_with("todo") {
                             let _ = cmd_tx.try_send(AppCommand::RefreshTodos);
@@ -214,6 +217,24 @@ async fn drive(
                             Ok(todos) => app.replace_todos(todos),
                             Err(error) => tracing::warn!(error = %error, "list_todos failed"),
                         },
+                        AppCommand::RefreshActivity => {
+                            match client.list_activity(50).await {
+                                Ok(activity) => app.replace_activity(activity),
+                                Err(error) => tracing::warn!(error = %error, "list_activity failed"),
+                            }
+                            match client.unseen_insights().await {
+                                Ok(unseen) => app.unseen_insights = unseen,
+                                Err(error) => tracing::warn!(error = %error, "unseen_insights failed"),
+                            }
+                        }
+                        AppCommand::MarkActivitySeen(ids) => {
+                            // Optimistic: the state already flipped locally
+                            // when the detail opened; persistence is
+                            // best-effort and reconciles on next refresh.
+                            if let Err(error) = client.mark_activity_seen(&ids).await {
+                                tracing::warn!(error = %error, "mark_activity_seen failed");
+                            }
+                        }
                         AppCommand::SwitchModel(name) => {
                             // Reconfigures the live session only; persisting to
                             // `.env` is a separate `lethe model <id>`.
@@ -275,6 +296,7 @@ fn tick_interval(app: &AppState) -> Duration {
 async fn refresh_sidebar(client: &LetheClient, cmd_tx: &mpsc::Sender<AppCommand>) {
     let _ = cmd_tx.try_send(AppCommand::RefreshActors);
     let _ = cmd_tx.try_send(AppCommand::RefreshTodos);
+    let _ = cmd_tx.try_send(AppCommand::RefreshActivity);
     // Touch the client so we get an early "Connected" via events_stream.
     let _ = client.health().await;
 }
@@ -355,6 +377,9 @@ async fn handle_key(
             return false;
         }
         KeyCode::Esc => {
+            if app.close_activity_detail() {
+                return false;
+            }
             if app.status == crate::tui::state::Status::Thinking {
                 let _ = cmd_tx.send(AppCommand::Cancel).await;
                 return false;
@@ -387,6 +412,27 @@ async fn handle_key(
             return false;
         }
         _ => {}
+    }
+
+    // Activity pane: arrow keys move the row cursor, Enter opens the
+    // detail popup (which is what marks a row seen — delivery ≠ seen),
+    // Enter/Esc closes it again.
+    if app.focused_pane == Pane::Activity {
+        match key.code {
+            KeyCode::Up => app.move_activity_selection(false),
+            KeyCode::Down => app.move_activity_selection(true),
+            KeyCode::Enter => {
+                if app.activity_detail.is_some() {
+                    app.close_activity_detail();
+                } else if let Some(first_view_id) = app.open_activity_detail() {
+                    let _ = cmd_tx
+                        .send(AppCommand::MarkActivitySeen(vec![first_view_id]))
+                        .await;
+                }
+            }
+            _ => {}
+        }
+        return false;
     }
 
     if app.focused_pane != Pane::Editor {
@@ -505,6 +551,7 @@ fn parse_slash_command(text: &str) -> Option<SlashCommand> {
         "cancel" => SlashCommand::Cancel,
         "todos" => SlashCommand::RefreshTodos,
         "actors" => SlashCommand::RefreshActors,
+        "activity" => SlashCommand::RefreshActivity,
         "model" if !args.is_empty() => SlashCommand::Model(args),
         "model" => SlashCommand::ModelShow,
         "quit" | "exit" => SlashCommand::Quit,
@@ -518,6 +565,7 @@ enum SlashCommand {
     Cancel,
     RefreshTodos,
     RefreshActors,
+    RefreshActivity,
     ModelShow,
     Model(String),
     Quit,
@@ -532,7 +580,7 @@ async fn handle_slash_command(
     match command {
         SlashCommand::Help => {
             app.push_notice(
-                "commands: /help · /clear · /cancel · /todos · /actors · /model [name] · /quit",
+                "commands: /help · /clear · /cancel · /todos · /actors · /activity · /model [name] · /quit",
             );
             app.push_notice(
                 "keys: Enter send · Shift+Enter newline · @ file complete · Tab cycle pane · Esc cancel turn",
@@ -553,6 +601,9 @@ async fn handle_slash_command(
         }
         SlashCommand::RefreshActors => {
             let _ = cmd_tx.send(AppCommand::RefreshActors).await;
+        }
+        SlashCommand::RefreshActivity => {
+            let _ = cmd_tx.send(AppCommand::RefreshActivity).await;
         }
         SlashCommand::ModelShow => {
             let label = if app.provider.is_empty() {

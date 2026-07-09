@@ -192,6 +192,47 @@ impl LetheClient {
             .unwrap_or_default())
     }
 
+    pub async fn list_activity(&self, limit: usize) -> Result<Vec<Value>> {
+        let url = format!("{}/activity", self.base_url);
+        let response = self
+            .auth(self.http.get(url))
+            .query(&[("limit", limit)])
+            .send()
+            .await?;
+        let response = response.error_for_status()?;
+        let payload: Value = response.json().await?;
+        Ok(payload
+            .get("activity")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default())
+    }
+
+    /// Unseen insights only — the number behind the sidebar's green dot.
+    pub async fn unseen_insights(&self) -> Result<u64> {
+        let url = format!("{}/activity/unseen-count", self.base_url);
+        let response = self
+            .auth(self.http.get(url))
+            .query(&[("kind", "insight")])
+            .send()
+            .await?;
+        let response = response.error_for_status()?;
+        let payload: Value = response.json().await?;
+        Ok(payload
+            .get("unseen")
+            .and_then(Value::as_u64)
+            .unwrap_or_default())
+    }
+
+    pub async fn mark_activity_seen(&self, ids: &[i64]) -> Result<()> {
+        let url = format!("{}/activity/seen", self.base_url);
+        self.auth(self.http.post(url).json(&json!({ "ids": ids })))
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(())
+    }
+
     pub async fn session_history(&self, limit: usize) -> Result<Vec<Value>> {
         let url = format!("{}/session/history", self.base_url);
         let response = self
@@ -370,6 +411,7 @@ fn parse_sse(event: &str, data: &str) -> UiEvent {
                 .and_then(Value::as_u64)
                 .unwrap_or(0),
         },
+        "activity.logged" => UiEvent::ActivityLogged,
         "actor.spawned" | "actor.state" | "actor.task" | "actor.message" => UiEvent::ActorEvent {
             kind: event.to_string(),
             actor_id: value
