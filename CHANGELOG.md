@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.23.6 - Hosted plugins and authoritative Agenda
+
+- **Hosted plugins are discovered and invoked through one trusted bridge.**
+  Hosted deployments can inject a user-scoped catalog endpoint; Lethe then
+  loads enabled plugin tools and prompt context dynamically, dispatches calls
+  with bounded retries and idempotency, and refreshes the catalog without
+  teaching the core binary about each plugin. Standalone installs remain fully
+  local when the bridge is not configured.
+- **Hosted Agenda can be the single task authority.** With
+  `LETHE_HOSTED_DISABLE_LOCAL_TODOS=true`, Agenda's `todo_*` tools replace the
+  local set and its current work is surfaced automatically in model context.
+  Local active-task prompts, heartbeat checks, and brainstem reminders are also
+  suppressed, preventing duplicate or split-brain reminders during a gateway
+  outage.
+
 ## 0.23.5 - Tool-family loading, browser-act schema, client chat egress
 
 - **Requesting one tool now loads its whole family.** The vault/identity tools,

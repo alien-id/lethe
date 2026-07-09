@@ -495,7 +495,12 @@ scripts/package-release
 ls dist/
 ```
 
-Tagged pushes (`v*`) build GitHub release assets on a four-runner matrix — `linux-x86_64`, `linux-aarch64`, `macos-x86_64`, `macos-aarch64` — each producing one `lethe-<target>.tar.gz` plus a sibling `lethe-migrate-<target>.tar.gz` (`install.sh` and `update.sh` consume the `lethe-*` assets from the latest release). Linux gnu binaries are built on `ubuntu-22.04(-arm)` for a glibc 2.35 floor; macOS binaries link only against system frameworks.
+Tagged pushes (`v*`) build GitHub release assets on a three-runner matrix —
+`linux-x86_64`, `linux-aarch64`, and `macos-aarch64` — each producing one
+`lethe-<target>.tar.gz` plus its `.sha256` checksum (`install.sh` and
+`update.sh` consume these assets from the latest release). Linux GNU binaries
+are built on Ubuntu 24.04 for a glibc 2.39 floor; macOS binaries link only
+against system frameworks.
 
 Useful smoke checks:
 
