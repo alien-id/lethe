@@ -150,6 +150,10 @@ pub struct Agent {
     shell: ShellTools,
     actor_registry: Option<SharedActorRegistry>,
     principal_actor_id: Option<String>,
+    /// Append-only insight/activity ledger (see `actor::ActivityLog`). The
+    /// registry holds a clone for termination records; this handle serves
+    /// reads (history, unseen count, mark-seen) and insight writes.
+    activity_log: Option<crate::actor::ActivityLog>,
     notification_gate: Mutex<NotificationGate>,
     processed_notification_events: Mutex<HashSet<String>>,
     /// `prompt_tokens` from the most recent LLM response. Drives the
@@ -206,6 +210,20 @@ impl Agent {
         ))));
         let shell = ShellTools::new(&settings.paths.workspace_dir);
         let last_prompt_tokens = Arc::new(AtomicU64::new(0));
+        // Insight/activity ledger: persistent history of noteworthy background
+        // output with seen-state. Lives in the unified memory DB next to the
+        // actors table; the registry writes termination records, the agent
+        // writes insights and serves reads. Absence degrades to "no history",
+        // never an error.
+        let activity_log =
+            match crate::actor::ActivityLog::open(settings.paths.memory_dir.join("lethe-memory.db"))
+            {
+                Ok(activity_log) => Some(activity_log),
+                Err(error) => {
+                    tracing::warn!(error = %error, "activity ledger unavailable — background history will not be recorded");
+                    None
+                }
+            };
         let (actor_registry, principal_actor_id) = if settings.background.actors_enabled {
             let mut registry = ActorRegistry::new();
             registry.set_prompts(prompts.clone());
@@ -218,6 +236,9 @@ impl Agent {
                 Err(error) => {
                     tracing::warn!(error = %error, "actor store unavailable — actor state will not survive restarts");
                 }
+            }
+            if let Some(activity_log) = &activity_log {
+                registry.set_activity_log(activity_log.clone());
             }
             let principal_id = registry.spawn(
                 ActorConfig::new("cortex", "Serve the user.").in_group("main"),
@@ -247,6 +268,7 @@ impl Agent {
             shell,
             actor_registry,
             principal_actor_id,
+            activity_log,
             notification_gate: Mutex::new(NotificationGate::new(15 * 60)),
             processed_notification_events: Mutex::new(HashSet::new()),
             last_prompt_tokens,
@@ -483,6 +505,11 @@ impl Agent {
 
     pub fn principal_actor_id(&self) -> Option<&str> {
         self.principal_actor_id.as_deref()
+    }
+
+    /// The insight/activity ledger, when persistence is available.
+    pub fn activity_log(&self) -> Option<&crate::actor::ActivityLog> {
+        self.activity_log.as_ref()
     }
 
     pub async fn run_curator_pass(&self, force: bool) -> AgentResult<CuratorRunStats> {

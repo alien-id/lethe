@@ -9,6 +9,7 @@ use serde_json::Value;
 use thiserror::Error;
 use tokio::sync::broadcast;
 
+mod activity_log;
 pub mod background;
 mod helpers;
 pub mod notification;
@@ -16,6 +17,7 @@ mod persistence;
 mod registry;
 mod runtime;
 
+pub use activity_log::{ActivityKind, ActivityLog, ActivityRow, NewActivity, compact_summary};
 pub use persistence::ActorStore;
 pub use registry::ActorRegistry;
 pub use runtime::{

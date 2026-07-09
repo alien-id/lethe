@@ -25,6 +25,11 @@ pub struct ActorRegistry {
     /// Optional SQLite write-through. When set, every actor mutation is
     /// snapshotted so unfinished work survives a process restart.
     store: Option<crate::actor::persistence::ActorStore>,
+    /// Optional append-only insight/activity ledger. When set, completed
+    /// background work is recorded as history with seen-state — a read-only
+    /// record, deliberately separate from the `actors` table and the
+    /// rehydration path (finished actors are never resurrected).
+    activity_log: Option<crate::actor::ActivityLog>,
     /// Template source for the actor-protocol prompt fragments (previous-turn
     /// checkpoint, restart notice, max-turns handoff). Defaults to embedded
     /// templates; `set_prompts` wires the workspace-overridable store.
@@ -40,12 +45,21 @@ impl ActorRegistry {
             principal_id: None,
             events: ActorEventBus::new(1000),
             store: None,
+            activity_log: None,
             prompts: crate::llm::prompts::PromptStore::new("", ""),
         }
     }
 
     pub fn set_store(&mut self, store: crate::actor::persistence::ActorStore) {
         self.store = Some(store);
+    }
+
+    pub fn set_activity_log(&mut self, activity_log: crate::actor::ActivityLog) {
+        self.activity_log = Some(activity_log);
+    }
+
+    pub fn activity_log(&self) -> Option<&crate::actor::ActivityLog> {
+        self.activity_log.as_ref()
     }
 
     pub fn set_prompts(&mut self, prompts: crate::llm::prompts::PromptStore) {
@@ -459,7 +473,66 @@ impl ActorRegistry {
             }),
         );
         self.persist_actor(actor_id);
+        self.log_terminated_activity(&actor);
         Ok(true)
+    }
+
+    /// Best-effort ledger record of a completed background task, so finished
+    /// work stays visible as history across restarts. Skips the principal
+    /// (not background work), the DMN (its user-facing signals go through
+    /// user_notify), and process-lifecycle terminations (restart/shutdown are
+    /// not completed work). Ledger failures are logged and never block.
+    fn log_terminated_activity(&mut self, actor: &Actor) {
+        let Some(activity_log) = &self.activity_log else {
+            return;
+        };
+        if actor.is_principal || actor.config.name == background::DMN_ACTOR_NAME {
+            return;
+        }
+        if matches!(
+            actor.outcome,
+            Some(Outcome::Restarted | Outcome::SystemShutdown)
+        ) {
+            return;
+        }
+        let result_text = actor.result.clone().unwrap_or_default();
+        let mut detail = result_text.clone();
+        if !actor.task_state_note.trim().is_empty() {
+            detail.push_str(&format!("\n\nTask note: {}", actor.task_state_note.trim()));
+        }
+        let entry = crate::actor::NewActivity {
+            kind: crate::actor::ActivityKind::Activity,
+            actor_id: Some(actor.id.clone()),
+            // terminate() already guards double-termination in-process; the
+            // event id makes the ledger idempotent across replays too.
+            event_id: Some(format!("terminate:{}", actor.id)),
+            title: actor.config.name.clone(),
+            summary: crate::actor::compact_summary(&result_text, 280),
+            detail: Some(detail).filter(|text| !text.trim().is_empty()),
+            category: None,
+            urgency: None,
+            source_name: actor.config.name.clone(),
+            produced_at: actor.terminated_at.unwrap_or_else(Utc::now),
+        };
+        match activity_log.append(&entry) {
+            Ok(Some(row_id)) => {
+                self.emit_event(
+                    "activity_logged",
+                    actor,
+                    json!({
+                        "activity_id": row_id,
+                        "kind": entry.kind.as_str(),
+                        "title": entry.title,
+                        "summary": entry.summary,
+                        "source_name": entry.source_name,
+                    }),
+                );
+            }
+            Ok(None) => {}
+            Err(error) => {
+                tracing::warn!(actor_id = %actor.id, error = %error, "activity ledger write failed");
+            }
+        }
     }
 
     pub fn finish_turn_or_terminate(

@@ -756,3 +756,67 @@ async fn runtime_excludes_dmn_task_updates_to_avoid_reflection_leak() {
     assert_eq!(events.len(), 1, "only the non-DMN update should pass");
     assert_eq!(events[0].actor_name, "researcher");
 }
+
+#[test]
+fn terminated_actor_lands_in_activity_ledger_but_principal_and_dmn_do_not() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ledger_path = tmp.path().join("ledger.db");
+    let activity_log = ActivityLog::open(&ledger_path).unwrap();
+
+    let mut registry = ActorRegistry::new();
+    registry.set_activity_log(activity_log.clone());
+    let principal = registry.spawn(
+        ActorConfig::new("cortex", "Serve the user").in_group("main"),
+        None,
+        true,
+    );
+    let worker = registry.spawn(
+        ActorConfig::new("researcher", "Survey embedding crates").in_group("main"),
+        Some(&principal),
+        false,
+    );
+    let dmn = registry.spawn(
+        ActorConfig::new(background::DMN_ACTOR_NAME, "Reflect quietly").in_group("main"),
+        Some(&principal),
+        false,
+    );
+    let restarted = registry.spawn(
+        ActorConfig::new("interrupted", "Old job").in_group("main"),
+        Some(&principal),
+        false,
+    );
+
+    registry
+        .terminate(
+            &worker,
+            Outcome::Success,
+            "Compared fastembed and candle; fastembed wins on cold-start.",
+        )
+        .unwrap();
+    registry.terminate(&dmn, Outcome::Killed, "dmn killed").unwrap();
+    registry
+        .terminate(&restarted, Outcome::Restarted, "process restart")
+        .unwrap();
+
+    let rows = activity_log.list(10, None).unwrap();
+    assert_eq!(rows.len(), 1, "only the real completed worker is history");
+    assert_eq!(rows[0].kind, "activity");
+    assert_eq!(rows[0].title, "researcher");
+    assert_eq!(rows[0].actor_id.as_deref(), Some(worker.as_str()));
+    assert!(rows[0].summary.contains("fastembed wins"));
+    assert!(rows[0].seen_at.is_none());
+    assert_eq!(
+        activity_log
+            .unseen_count(Some(ActivityKind::Activity))
+            .unwrap(),
+        1
+    );
+
+    // The ledger write also announces itself on the event bus (live badge).
+    let logged = registry.events.query(Some("activity_logged"), None, None, 10);
+    assert_eq!(logged.len(), 1);
+    assert_eq!(
+        logged[0].payload.get("title").and_then(|v| v.as_str()),
+        Some("researcher")
+    );
+}
