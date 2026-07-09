@@ -418,6 +418,15 @@ fn actor_event_to_api(event: &ActorEvent) -> Option<ApiEvent> {
                 "payload": payload,
             }),
         )),
+        // A new insight/activity ledger row: clients bump or re-fetch the
+        // unseen badge without polling.
+        "activity_logged" => Some(ApiEvent::new(
+            "activity.logged",
+            json!({
+                "actor_id": event.actor_id,
+                "payload": payload,
+            }),
+        )),
         _ => None,
     }
 }
@@ -433,6 +442,9 @@ pub fn router(state: ApiState) -> Router {
         .route("/file", get(serve_file))
         .route("/actors", get(list_actors))
         .route("/todos", get(list_todos))
+        .route("/activity", get(list_activity))
+        .route("/activity/unseen-count", get(activity_unseen_count))
+        .route("/activity/seen", post(activity_mark_seen))
         .route("/session/history", get(session_history))
         .route("/secure-input", post(secure_input_submit))
         .route("/secure-input/cancel", post(secure_input_cancel))
@@ -978,6 +990,118 @@ async fn list_todos(
     };
     match state.agent.memory().todos.list(filter) {
         Ok(todos) => Json(json!({"todos": todos})).into_response(),
+        Err(error) => json_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct ActivityListQuery {
+    #[serde(default)]
+    limit: Option<usize>,
+    /// Page past the previous page's last row id (rows are newest-first).
+    #[serde(default)]
+    before: Option<i64>,
+}
+
+/// Persistent background-activity history: insights and completed tasks,
+/// newest first, each row carrying its seen-state. Read-only over the
+/// ledger — never the actors table.
+async fn list_activity(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Query(query): Query<ActivityListQuery>,
+) -> Response {
+    if let Some(response) = require_auth(&state, &headers) {
+        return response;
+    }
+    let Some(activity_log) = state.agent.activity_log() else {
+        return Json(json!({"activity": []})).into_response();
+    };
+    match activity_log.list(query.limit.unwrap_or(50), query.before) {
+        Ok(rows) => Json(json!({"activity": rows})).into_response(),
+        Err(error) => json_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct UnseenCountQuery {
+    /// Restrict to 'insight' or 'activity'; omit for the combined count.
+    #[serde(default)]
+    kind: Option<String>,
+}
+
+/// The number behind the green dot: rows the user has never opened.
+async fn activity_unseen_count(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Query(query): Query<UnseenCountQuery>,
+) -> Response {
+    if let Some(response) = require_auth(&state, &headers) {
+        return response;
+    }
+    let Some(activity_log) = state.agent.activity_log() else {
+        return Json(json!({"unseen": 0})).into_response();
+    };
+    let kind = match query.kind.as_deref() {
+        None | Some("") => None,
+        Some(raw) => match crate::actor::ActivityKind::parse(raw) {
+            Some(kind) => Some(kind),
+            None => return json_error(StatusCode::BAD_REQUEST, "kind must be 'insight' or 'activity'"),
+        },
+    };
+    match activity_log.unseen_count(kind) {
+        Ok(unseen) => Json(json!({"unseen": unseen})).into_response(),
+        Err(error) => json_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct MarkSeenBody {
+    /// Specific rows the user opened.
+    #[serde(default)]
+    ids: Vec<i64>,
+    /// Mark every unseen row instead (optionally restricted by `kind`).
+    #[serde(default)]
+    all: bool,
+    #[serde(default)]
+    kind: Option<String>,
+}
+
+/// Seen means the user actually viewed it — clients call this when a row's
+/// detail opens (per-row) or on an explicit mark-all action, not on
+/// delivery.
+async fn activity_mark_seen(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Json(body): Json<MarkSeenBody>,
+) -> Response {
+    if let Some(response) = require_auth(&state, &headers) {
+        return response;
+    }
+    let Some(activity_log) = state.agent.activity_log() else {
+        return json_error(StatusCode::SERVICE_UNAVAILABLE, "activity ledger unavailable");
+    };
+    let result = if body.all {
+        let kind = match body.kind.as_deref() {
+            None | Some("") => None,
+            Some(raw) => match crate::actor::ActivityKind::parse(raw) {
+                Some(kind) => Some(kind),
+                None => {
+                    return json_error(
+                        StatusCode::BAD_REQUEST,
+                        "kind must be 'insight' or 'activity'",
+                    );
+                }
+            },
+        };
+        activity_log.mark_all_seen(kind)
+    } else if body.ids.is_empty() {
+        return json_error(StatusCode::BAD_REQUEST, "provide ids or all=true");
+    } else {
+        activity_log.mark_seen(&body.ids)
+    };
+    match result {
+        Ok(marked) => Json(json!({"marked": marked})).into_response(),
         Err(error) => json_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
     }
 }
