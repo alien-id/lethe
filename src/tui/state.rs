@@ -731,4 +731,114 @@ mod tests {
         ]);
         assert_eq!(assistant_texts(&state), vec!["Hello there"]);
     }
+
+    fn activity_json(id: i64, kind: &str, seen: bool) -> Value {
+        serde_json::json!({
+            "id": id,
+            "kind": kind,
+            "title": format!("row {id}"),
+            "summary": format!("summary {id}"),
+            "detail": null,
+            "source_name": "dmn",
+            "produced_at": "2026-07-09T10:00:00+00:00",
+            "seen_at": if seen { Value::String("2026-07-09T11:00:00+00:00".into()) } else { Value::Null },
+        })
+    }
+
+    #[test]
+    fn replace_activity_parses_rows_and_clamps_selection_and_detail() {
+        let mut state = AppState::new();
+        state.replace_activity(vec![
+            activity_json(3, "insight", false),
+            activity_json(2, "activity", true),
+        ]);
+        assert_eq!(state.activity.len(), 2);
+        assert!(!state.activity[0].seen);
+        assert!(state.activity[1].seen);
+
+        // Cursor and open detail past the end are clamped/closed on refresh.
+        state.activity_selected = 5;
+        state.activity_detail = Some(5);
+        state.replace_activity(vec![activity_json(3, "insight", false)]);
+        assert_eq!(state.activity_selected, 0);
+        assert_eq!(state.activity_detail, None);
+
+        state.replace_activity(Vec::new());
+        assert_eq!(state.activity_selected, 0);
+        assert_eq!(state.activity_detail, None);
+        // Rows missing required fields are skipped, not a crash.
+        state.replace_activity(vec![serde_json::json!({"kind": "insight"})]);
+        assert!(state.activity.is_empty());
+    }
+
+    #[test]
+    fn activity_selection_stays_in_bounds() {
+        let mut state = AppState::new();
+        state.move_activity_selection(true); // empty: no-op
+        assert_eq!(state.activity_selected, 0);
+
+        state.replace_activity(vec![
+            activity_json(3, "insight", false),
+            activity_json(2, "activity", false),
+        ]);
+        state.move_activity_selection(false); // already at top
+        assert_eq!(state.activity_selected, 0);
+        state.move_activity_selection(true);
+        assert_eq!(state.activity_selected, 1);
+        state.move_activity_selection(true); // already at bottom
+        assert_eq!(state.activity_selected, 1);
+    }
+
+    #[test]
+    fn open_activity_detail_marks_seen_once_and_only_insights_shrink_the_badge() {
+        let mut state = AppState::new();
+        assert_eq!(state.open_activity_detail(), None); // empty: nothing to open
+
+        state.replace_activity(vec![
+            activity_json(3, "insight", false),
+            activity_json(2, "activity", false),
+        ]);
+        state.unseen_insights = 1;
+
+        // First viewing of the insight: seen locally, id returned for
+        // persistence, badge drops.
+        assert_eq!(state.open_activity_detail(), Some(3));
+        assert_eq!(state.activity_detail, Some(0));
+        assert!(state.activity[0].seen);
+        assert_eq!(state.unseen_insights, 0);
+
+        // Re-opening the same row: nothing left to persist.
+        assert_eq!(state.open_activity_detail(), None);
+
+        // Completed-task rows mark seen but never touch the insight badge.
+        state.activity_selected = 1;
+        assert_eq!(state.open_activity_detail(), Some(2));
+        assert!(state.activity[1].seen);
+        assert_eq!(state.unseen_insights, 0);
+
+        assert!(state.close_activity_detail());
+        assert!(!state.close_activity_detail()); // already closed
+        assert_eq!(state.activity_detail, None);
+    }
+
+    #[test]
+    fn focus_cycle_visits_activity_pane() {
+        let mut state = AppState::new();
+        assert_eq!(state.focused_pane, Pane::Editor);
+        let mut seen_panes = Vec::new();
+        for _ in 0..5 {
+            state.cycle_focus();
+            seen_panes.push(state.focused_pane);
+        }
+        assert_eq!(
+            seen_panes,
+            vec![
+                Pane::Transcript,
+                Pane::Actors,
+                Pane::Activity,
+                Pane::Todos,
+                Pane::Editor
+            ]
+        );
+    }
 }

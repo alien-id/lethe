@@ -1383,4 +1383,222 @@ mod tests {
         .await
         .unwrap();
     }
+
+    fn bearer(token: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+        );
+        headers
+    }
+
+    async fn response_json(response: Response) -> Value {
+        let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    fn seed_insight(state: &ApiState, event_id: &str, title: &str) -> i64 {
+        state
+            .agent
+            .activity_log()
+            .expect("test agent has a ledger")
+            .append(&crate::actor::NewActivity {
+                kind: crate::actor::ActivityKind::Insight,
+                actor_id: None,
+                event_id: Some(event_id.to_string()),
+                title: title.to_string(),
+                summary: format!("{title} summary"),
+                detail: None,
+                category: Some("insight".to_string()),
+                urgency: Some("low".to_string()),
+                source_name: "dmn".to_string(),
+                produced_at: chrono::Utc::now(),
+            })
+            .unwrap()
+            .expect("inserted")
+    }
+
+    #[tokio::test]
+    async fn activity_endpoints_round_trip_list_count_and_mark_seen() {
+        let tmp = tempdir().unwrap();
+        let state = ApiState::from_settings(test_settings(tmp.path())).unwrap();
+        let first = seed_insight(&state, "ev-1", "First");
+        let second = seed_insight(&state, "ev-2", "Second");
+
+        // Auth is enforced on all three routes.
+        for response in [
+            list_activity(
+                State(state.clone()),
+                HeaderMap::new(),
+                Query(ActivityListQuery {
+                    limit: None,
+                    before: None,
+                }),
+            )
+            .await,
+            activity_unseen_count(
+                State(state.clone()),
+                HeaderMap::new(),
+                Query(UnseenCountQuery { kind: None }),
+            )
+            .await,
+            activity_mark_seen(
+                State(state.clone()),
+                HeaderMap::new(),
+                Json(MarkSeenBody {
+                    ids: vec![first],
+                    all: false,
+                    kind: None,
+                }),
+            )
+            .await,
+        ] {
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        }
+
+        // List: newest first, seen_at exposed as null while unseen.
+        let response = list_activity(
+            State(state.clone()),
+            bearer("secret"),
+            Query(ActivityListQuery {
+                limit: None,
+                before: None,
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let payload = response_json(response).await;
+        let rows = payload["activity"].as_array().unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0]["id"].as_i64(), Some(second));
+        assert_eq!(rows[1]["id"].as_i64(), Some(first));
+        assert!(rows[0]["seen_at"].is_null());
+
+        // Paging: before=<newest id> yields only the older row.
+        let response = list_activity(
+            State(state.clone()),
+            bearer("secret"),
+            Query(ActivityListQuery {
+                limit: None,
+                before: Some(second),
+            }),
+        )
+        .await;
+        let payload = response_json(response).await;
+        let rows = payload["activity"].as_array().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["id"].as_i64(), Some(first));
+
+        // The badge count, then mark one row seen, then recount.
+        let response = activity_unseen_count(
+            State(state.clone()),
+            bearer("secret"),
+            Query(UnseenCountQuery {
+                kind: Some("insight".to_string()),
+            }),
+        )
+        .await;
+        assert_eq!(response_json(response).await["unseen"].as_i64(), Some(2));
+
+        let response = activity_mark_seen(
+            State(state.clone()),
+            bearer("secret"),
+            Json(MarkSeenBody {
+                ids: vec![first],
+                all: false,
+                kind: None,
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response_json(response).await["marked"].as_i64(), Some(1));
+
+        let response = activity_unseen_count(
+            State(state.clone()),
+            bearer("secret"),
+            Query(UnseenCountQuery {
+                kind: Some("insight".to_string()),
+            }),
+        )
+        .await;
+        assert_eq!(response_json(response).await["unseen"].as_i64(), Some(1));
+
+        // mark-all clears the rest.
+        let response = activity_mark_seen(
+            State(state.clone()),
+            bearer("secret"),
+            Json(MarkSeenBody {
+                ids: Vec::new(),
+                all: true,
+                kind: Some("insight".to_string()),
+            }),
+        )
+        .await;
+        assert_eq!(response_json(response).await["marked"].as_i64(), Some(1));
+        let response = activity_unseen_count(
+            State(state.clone()),
+            bearer("secret"),
+            Query(UnseenCountQuery { kind: None }),
+        )
+        .await;
+        assert_eq!(response_json(response).await["unseen"].as_i64(), Some(0));
+    }
+
+    #[tokio::test]
+    async fn activity_endpoints_reject_bad_kind_and_empty_mark_request() {
+        let tmp = tempdir().unwrap();
+        let state = ApiState::from_settings(test_settings(tmp.path())).unwrap();
+
+        let response = activity_unseen_count(
+            State(state.clone()),
+            bearer("secret"),
+            Query(UnseenCountQuery {
+                kind: Some("bogus".to_string()),
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        let response = activity_mark_seen(
+            State(state.clone()),
+            bearer("secret"),
+            Json(MarkSeenBody {
+                ids: Vec::new(),
+                all: true,
+                kind: Some("bogus".to_string()),
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        // Neither ids nor all=true: nothing to do, explicit 400.
+        let response = activity_mark_seen(
+            State(state.clone()),
+            bearer("secret"),
+            Json(MarkSeenBody {
+                ids: Vec::new(),
+                all: false,
+                kind: None,
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        // Marking ids that don't exist is not an error — zero rows changed.
+        let response = activity_mark_seen(
+            State(state.clone()),
+            bearer("secret"),
+            Json(MarkSeenBody {
+                ids: vec![9999],
+                all: false,
+                kind: None,
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response_json(response).await["marked"].as_i64(), Some(0));
+    }
 }
