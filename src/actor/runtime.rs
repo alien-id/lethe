@@ -207,6 +207,17 @@ impl ActorRuntime {
             .map_err(actor_runtime_error)
     }
 
+    /// Append entries to the insight/activity ledger through the registry so
+    /// each write also emits an `activity_logged` event for live badge
+    /// updates. Returns how many rows were actually inserted (dedup and
+    /// ledger failures shrink the count; they never error out).
+    pub async fn log_activities(&self, entries: Vec<crate::actor::NewActivity>) -> ActorResult<usize> {
+        self.supervisor
+            .ask(LogActivities { entries })
+            .await
+            .map_err(actor_runtime_error)
+    }
+
     pub async fn principal_task_update_events(
         &self,
         principal_id: &str,
@@ -823,6 +834,27 @@ impl Message<UserNotificationEvents> for ActorSupervisor {
                 ActorNamedEvent { event, actor_name }
             })
             .collect())
+    }
+}
+
+#[derive(Debug)]
+struct LogActivities {
+    entries: Vec<crate::actor::NewActivity>,
+}
+
+impl Message<LogActivities> for ActorSupervisor {
+    type Reply = ActorResult<usize>;
+
+    async fn handle(
+        &mut self,
+        message: LogActivities,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        Ok(message
+            .entries
+            .iter()
+            .filter_map(|entry| self.registry.log_activity(entry))
+            .count())
     }
 }
 

@@ -36,6 +36,19 @@ pub enum NotificationCategory {
     Error,
 }
 
+impl NotificationCategory {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Status => "status",
+            Self::Warning => "warning",
+            Self::Reminder => "reminder",
+            Self::Update => "update",
+            Self::Insight => "insight",
+            Self::Error => "error",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NotificationUrgency {
@@ -43,6 +56,17 @@ pub enum NotificationUrgency {
     Normal,
     High,
     Critical,
+}
+
+impl NotificationUrgency {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Normal => "normal",
+            Self::High => "high",
+            Self::Critical => "critical",
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

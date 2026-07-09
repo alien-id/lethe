@@ -5,12 +5,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::actor::notification::{
-    GateAction, GateDecision, NotificationAssessment, NotificationGate, NotificationScoring,
-    UserNotificationSignal,
+    GateAction, GateDecision, NotificationAssessment, NotificationCategory, NotificationGate,
+    NotificationScoring, UserNotificationSignal,
 };
 use crate::actor::{
-    ActorConfig, ActorError, ActorNamedEvent, ActorRegistry, ActorRuntime, ActorSupervisor,
-    MessageIntent, ModelTier,
+    ActivityKind, ActorConfig, ActorError, ActorNamedEvent, ActorRegistry, ActorRuntime,
+    ActorSupervisor, MessageIntent, ModelTier, NewActivity, compact_summary,
 };
 use crate::scheduler::curator::CuratorRunStats;
 
@@ -27,6 +27,46 @@ impl BackgroundNotification {
     pub fn user_message(&self) -> String {
         self.signal.content.trim().to_string()
     }
+
+    /// Whether this notification may interrupt the user. Gate-silenced
+    /// insights (`action == Drop`) are still collected for the ledger — the
+    /// unseen-insight badge is their non-interrupting delivery channel.
+    pub fn is_deliverable(&self) -> bool {
+        self.decision.action == GateAction::Review
+    }
+
+    pub fn is_insight(&self) -> bool {
+        self.signal.category == NotificationCategory::Insight
+    }
+
+    /// The ledger row for this notification. Call only after the LLM review
+    /// gate has kept (and possibly rewritten) the content — `summary` must be
+    /// the clean user-facing text, never raw reflection.
+    pub fn ledger_entry(&self) -> NewActivity {
+        let content = self.signal.content.trim();
+        NewActivity {
+            kind: ActivityKind::Insight,
+            actor_id: Some(self.signal.source_actor_id.clone()),
+            event_id: Some(self.signal.event_id.clone()),
+            title: insight_title(content),
+            summary: content.to_string(),
+            detail: None,
+            category: Some(self.signal.category.as_str().to_string()),
+            urgency: Some(self.signal.urgency.as_str().to_string()),
+            source_name: self.signal.source_name.clone(),
+            produced_at: self.signal.observed_at,
+        }
+    }
+}
+
+/// Short headline for an insight row: its first sentence, capped. The full
+/// content stays in `summary`.
+fn insight_title(content: &str) -> String {
+    let first_sentence = content
+        .split_inclusive(['.', '!', '?'])
+        .next()
+        .unwrap_or(content);
+    compact_summary(first_sentence.trim_end_matches(['.', '!', '?']), 64)
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -308,7 +348,16 @@ pub fn collect_user_notifications_from_events(
         );
         let assessment = scoring.assess(&signal);
         let decision = gate.decide(&signal, &assessment);
-        if decision.action == GateAction::Review {
+        // Review-worthy candidates pass through; so do insights the gate
+        // silenced as interruptions (insights default to Low urgency and low
+        // relevance, so the gate drops nearly all of them by design). They
+        // are collected for the persistent ledger, not for delivery —
+        // `is_deliverable()` keeps the two fates apart. Duplicates stay
+        // dropped everywhere.
+        let keep = decision.action == GateAction::Review
+            || (signal.category == NotificationCategory::Insight
+                && decision.reason != "duplicate_signal");
+        if keep {
             notifications.push(BackgroundNotification {
                 signal,
                 assessment,
@@ -434,6 +483,71 @@ mod tests {
             )
             .is_empty()
         );
+    }
+
+    #[test]
+    fn gate_silenced_insights_are_collected_for_the_ledger_but_not_deliverable() {
+        let (mut registry, principal) = registry();
+        let dmn = ensure_dmn_actor(&mut registry, &principal).unwrap();
+        let mut metadata = serde_json::Map::new();
+        metadata.insert("signal_category".to_string(), json!("insight"));
+        registry
+            .send_to(
+                &dmn,
+                &principal,
+                "Your Meteora position fees doubled this week. Might be worth rebalancing.",
+                None,
+                metadata,
+                Some(MessageIntent::Info),
+            )
+            .unwrap();
+
+        let mut gate = NotificationGate::new(900);
+        let mut processed = HashSet::new();
+        let notifications = collect_user_notifications_from_events(
+            named_user_notify_events(&registry, 10),
+            &mut gate,
+            &mut processed,
+        );
+
+        // Insights default to Low urgency, so the interruption gate drops
+        // them — but they must still be collected for the ledger.
+        assert_eq!(notifications.len(), 1);
+        let insight = &notifications[0];
+        assert!(insight.is_insight());
+        assert!(!insight.is_deliverable());
+        assert_eq!(insight.decision.action, GateAction::Drop);
+
+        let entry = insight.ledger_entry();
+        assert_eq!(entry.kind, ActivityKind::Insight);
+        assert_eq!(entry.title, "Your Meteora position fees doubled this week");
+        assert!(entry.summary.contains("worth rebalancing"));
+        assert_eq!(entry.category.as_deref(), Some("insight"));
+        assert_eq!(entry.urgency.as_deref(), Some("low"));
+        assert_eq!(entry.source_name, "dmn");
+        assert!(entry.event_id.is_some());
+
+        // A replay of the same signal is a duplicate: dropped everywhere,
+        // including the ledger path.
+        registry
+            .send_to(
+                &dmn,
+                &principal,
+                "Your Meteora position fees doubled this week. Might be worth rebalancing.",
+                None,
+                serde_json::Map::from_iter([(
+                    "signal_category".to_string(),
+                    json!("insight"),
+                )]),
+                Some(MessageIntent::Info),
+            )
+            .unwrap();
+        let replay = collect_user_notifications_from_events(
+            named_user_notify_events(&registry, 10),
+            &mut gate,
+            &mut processed,
+        );
+        assert!(replay.is_empty());
     }
 
     fn named_user_notify_events(registry: &ActorRegistry, limit: usize) -> Vec<ActorNamedEvent> {

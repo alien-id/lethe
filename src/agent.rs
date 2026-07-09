@@ -555,45 +555,83 @@ impl Agent {
         let mut result = self
             .queue_background_heartbeat(heartbeat_message, reminders)
             .await?;
-        if let Some(registry) = self.actor_registry.clone() {
-            let candidates = {
-                let events = registry
-                    .user_notification_events(50)
-                    .await
-                    .map_err(|error| {
-                        AgentError::Llm(anyhow!("notification query failed: {error}"))
-                    })?;
-                let mut gate = self.notification_gate.lock().map_err(|error| {
-                    AgentError::Llm(anyhow!("notification gate lock poisoned: {error}"))
-                })?;
-                let mut processed = self.processed_notification_events.lock().map_err(|error| {
-                    AgentError::Llm(anyhow!("notification event lock poisoned: {error}"))
-                })?;
-                collect_user_notifications_from_events(events, &mut gate, &mut processed)
-            };
-            // Run the aux-LLM content gate. This catches leaks the heuristic
-            // gate misses — internal reflection, meta commentary about DMN/
-            // cortex, redundant pings — and rewrites borderline content. On
-            // failure the gate drops the candidate (fail-closed).
-            result.notifications = if candidates.is_empty() {
-                Vec::new()
-            } else {
-                let recent_context = self.recent_user_context_for_review(5);
-                let router = self
-                    .router
-                    .read()
-                    .map_err(|error| AgentError::Llm(anyhow!("router lock poisoned: {error}")))?
-                    .clone();
-                crate::actor::background::review_notifications_with_llm(
-                    candidates,
-                    &recent_context,
-                    &self.prompts,
-                    &router,
-                )
-                .await
-            };
-        }
+        let reviewed = self.collect_review_and_log_notifications().await?;
+        // Only gate-approved notifications may interrupt the user; kept
+        // insights the gate silenced already reached their channel (the
+        // ledger and its unseen badge) inside the collection step.
+        result.notifications = reviewed
+            .into_iter()
+            .filter(|notification| notification.is_deliverable())
+            .collect();
         Ok(result)
+    }
+
+    /// The shared background-notification pipeline: drain new `user_notify`
+    /// events through the heuristic gate (keeping gate-silenced insights for
+    /// the ledger), run the aux-LLM content review, and append every kept
+    /// insight to the persistent ledger. Returns the kept notifications —
+    /// deliverable and ledger-only alike.
+    async fn collect_review_and_log_notifications(
+        &self,
+    ) -> AgentResult<Vec<crate::actor::background::BackgroundNotification>> {
+        let Some(registry) = self.actor_registry.clone() else {
+            return Ok(Vec::new());
+        };
+        let candidates = {
+            let events = registry
+                .user_notification_events(50)
+                .await
+                .map_err(|error| AgentError::Llm(anyhow!("notification query failed: {error}")))?;
+            let mut gate = self.notification_gate.lock().map_err(|error| {
+                AgentError::Llm(anyhow!("notification gate lock poisoned: {error}"))
+            })?;
+            let mut processed = self.processed_notification_events.lock().map_err(|error| {
+                AgentError::Llm(anyhow!("notification event lock poisoned: {error}"))
+            })?;
+            collect_user_notifications_from_events(events, &mut gate, &mut processed)
+        };
+        if candidates.is_empty() {
+            return Ok(Vec::new());
+        }
+        // Run the aux-LLM content gate. This catches leaks the heuristic
+        // gate misses — internal reflection, meta commentary about DMN/
+        // cortex, redundant pings — and rewrites borderline content. On
+        // failure the gate drops the candidate (fail-closed). Ledger rows
+        // are created only after this step so `summary` is always the clean
+        // reviewed text, never raw reflection.
+        let recent_context = self.recent_user_context_for_review(5);
+        let router = self
+            .router
+            .read()
+            .map_err(|error| AgentError::Llm(anyhow!("router lock poisoned: {error}")))?
+            .clone();
+        let kept = crate::actor::background::review_notifications_with_llm(
+            candidates,
+            &recent_context,
+            &self.prompts,
+            &router,
+        )
+        .await;
+
+        let insight_entries: Vec<crate::actor::NewActivity> = kept
+            .iter()
+            .filter(|notification| notification.is_insight())
+            .map(|notification| notification.ledger_entry())
+            .collect();
+        if !insight_entries.is_empty() {
+            // Best-effort, like all ledger writes: a failure loses history,
+            // never a heartbeat.
+            match registry.log_activities(insight_entries).await {
+                Ok(count) if count > 0 => {
+                    tracing::info!(count, "insights recorded in activity ledger");
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    tracing::warn!(error = %error, "insight ledger write failed");
+                }
+            }
+        }
+        Ok(kept)
     }
 
     /// Compact recent user-side context for the notification review gate so
@@ -631,13 +669,24 @@ impl Agent {
         lines.join("\n")
     }
 
+    /// The daemon-loop variant: same queueing and the same collect/review/
+    /// ledger pipeline, but nothing is returned for delivery — "quiet" means
+    /// no interruptions, not no record. Without this, insights produced in
+    /// daemon mode would sit in the in-memory event ring until overwritten
+    /// and never reach the ledger (the full pipeline used to run only from
+    /// the CLI heartbeat command).
     pub async fn process_background_heartbeat_quiet(
         &self,
         heartbeat_message: &str,
         reminders: &str,
     ) -> AgentResult<BackgroundResult> {
-        self.queue_background_heartbeat(heartbeat_message, reminders)
-            .await
+        let result = self
+            .queue_background_heartbeat(heartbeat_message, reminders)
+            .await?;
+        if let Err(error) = self.collect_review_and_log_notifications().await {
+            tracing::warn!(error = %error, "quiet heartbeat notification collection failed");
+        }
+        Ok(result)
     }
 
     async fn queue_background_heartbeat(

@@ -483,9 +483,9 @@ impl ActorRegistry {
     /// user_notify), and process-lifecycle terminations (restart/shutdown are
     /// not completed work). Ledger failures are logged and never block.
     fn log_terminated_activity(&mut self, actor: &Actor) {
-        let Some(activity_log) = &self.activity_log else {
+        if self.activity_log.is_none() {
             return;
-        };
+        }
         if actor.is_principal || actor.config.name == background::DMN_ACTOR_NAME {
             return;
         }
@@ -514,23 +514,51 @@ impl ActorRegistry {
             source_name: actor.config.name.clone(),
             produced_at: actor.terminated_at.unwrap_or_else(Utc::now),
         };
-        match activity_log.append(&entry) {
+        self.log_activity(&entry);
+    }
+
+    /// Append one entry to the ledger and announce it on the event bus so
+    /// live surfaces can refresh their unseen badge. Returns the new row id;
+    /// `None` on dedup or (logged) failure — never blocks agent work.
+    pub fn log_activity(&mut self, entry: &crate::actor::NewActivity) -> Option<i64> {
+        let activity_log = self.activity_log.as_ref()?;
+        match activity_log.append(entry) {
             Ok(Some(row_id)) => {
-                self.emit_event(
-                    "activity_logged",
-                    actor,
-                    json!({
-                        "activity_id": row_id,
-                        "kind": entry.kind.as_str(),
-                        "title": entry.title,
-                        "summary": entry.summary,
-                        "source_name": entry.source_name,
-                    }),
-                );
+                // Events are actor-scoped: attribute to the producing actor
+                // when it is still registered, else to the principal.
+                let actor = entry
+                    .actor_id
+                    .as_ref()
+                    .and_then(|id| self.actors.get(id))
+                    .or_else(|| {
+                        self.principal_id
+                            .as_ref()
+                            .and_then(|id| self.actors.get(id))
+                    })
+                    .cloned();
+                if let Some(actor) = actor {
+                    self.emit_event(
+                        "activity_logged",
+                        &actor,
+                        json!({
+                            "activity_id": row_id,
+                            "kind": entry.kind.as_str(),
+                            "title": entry.title,
+                            "summary": entry.summary,
+                            "source_name": entry.source_name,
+                        }),
+                    );
+                }
+                Some(row_id)
             }
-            Ok(None) => {}
+            Ok(None) => None,
             Err(error) => {
-                tracing::warn!(actor_id = %actor.id, error = %error, "activity ledger write failed");
+                tracing::warn!(
+                    source = %entry.source_name,
+                    error = %error,
+                    "activity ledger write failed"
+                );
+                None
             }
         }
     }
