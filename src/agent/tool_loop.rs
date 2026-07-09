@@ -326,6 +326,7 @@ pub(super) struct TurnExecutionContext {
     /// the next turn's compaction budget reflects real usage instead of a
     /// crude char estimate. Zero means "no measurement yet".
     pub last_prompt_tokens: Arc<AtomicU64>,
+    pub hosted_plugins: Option<Arc<crate::tools::hosted_plugins::HostedPluginClient>>,
 }
 
 /// Build the actor turn executor that the [`ActorRuntime`] supervisor calls
@@ -336,6 +337,7 @@ pub(super) fn actor_turn_executor(
     router: Arc<RwLock<LlmRouter>>,
     shell: ShellTools,
     last_prompt_tokens: Arc<AtomicU64>,
+    hosted_plugins: Option<Arc<crate::tools::hosted_plugins::HostedPluginClient>>,
 ) -> ActorTurnExecutor {
     let context = TurnExecutionContext {
         settings,
@@ -343,6 +345,7 @@ pub(super) fn actor_turn_executor(
         router,
         shell,
         last_prompt_tokens,
+        hosted_plugins,
     };
     Arc::new(move |spec: ActorRunSpec, runtime: ActorRuntime| {
         let context = context.clone();
@@ -356,8 +359,47 @@ pub(super) fn actor_turn_executor(
                 requested_tools: spec.requested_tools.clone(),
                 ..ToolRuntime::default()
             };
+            let mut system_prompt = spec.system_prompt.clone();
+            if let Some(client) = context.hosted_plugins.as_ref() {
+                if let Err(error) = client.refresh_catalog().await {
+                    tracing::warn!(error = %error, "hosted plugin catalog unavailable to subagent");
+                }
+                // ActorRegistry builds its requestable directory before a
+                // ToolRuntime exists. Remove hosted-owned local definitions,
+                // then append the dynamic directory and bounded plugin data.
+                system_prompt = system_prompt
+                    .lines()
+                    .filter(|line| {
+                        let name = line
+                            .strip_prefix("- ")
+                            .and_then(|line| line.split_once(" — "))
+                            .map(|(name, _)| name.trim());
+                        !name.is_some_and(|name| client.replaces_builtin(name))
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                let directory = client.requestable_directory();
+                if !directory.is_empty() {
+                    system_prompt.push_str(
+                        "\n\n<available_on_request source=\"hosted_plugins\">\n\
+                         Tools below are NOT loaded. Call request_tool(name=...) to enable one for this turn.\n",
+                    );
+                    system_prompt.push_str(&directory);
+                    system_prompt.push_str("\n</available_on_request>");
+                }
+                match client.context_blocks().await {
+                    Ok(plugin_context) if !plugin_context.trim().is_empty() => {
+                        system_prompt.push_str("\n\n");
+                        system_prompt.push_str(plugin_context.trim());
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        tracing::warn!(error = %error, "hosted plugin context unavailable to subagent")
+                    }
+                }
+            }
             let messages = vec![
-                LlmMessage::system(spec.system_prompt.clone()),
+                LlmMessage::system(system_prompt),
                 LlmMessage::user(actor_turn_instruction(&spec)),
             ];
             complete_turn_with_tools_config_shared(
@@ -391,10 +433,20 @@ pub(super) fn actor_turn_executor(
 pub(super) async fn complete_turn_with_tools_config_shared(
     context: TurnExecutionContext,
     messages: Vec<LlmMessage>,
-    runtime: ToolRuntime,
+    mut runtime: ToolRuntime,
     use_aux: bool,
     record_tool_messages: bool,
 ) -> AgentResult<TurnOutput> {
+    if runtime.hosted_plugins.is_none() {
+        runtime.hosted_plugins = context.hosted_plugins.clone();
+    }
+    if let Some(client) = runtime.hosted_plugins.as_ref()
+        && let Err(error) = client.refresh_catalog().await
+    {
+        // Keep the last-known catalog. On a cold outage, configured replacement
+        // families remain hidden rather than falling back to local state.
+        tracing::warn!(error = %error, "hosted plugin catalog refresh failed");
+    }
     let mut active_tools = runtime
         .requested_tools
         .iter()
@@ -593,8 +645,11 @@ pub(super) async fn complete_turn_with_tools_config_shared(
             let raw_result = if call.fn_name == "request_tool" {
                 request_tool_for_turn(&registry, &mut active_tools, &call.fn_arguments)
             } else if registry.tool_is_active(&call.fn_name, &active_tools) {
-                let inner: BoxToolFuture<'_> =
-                    Box::pin(registry.execute_async(&call.fn_name, &call.fn_arguments));
+                let inner: BoxToolFuture<'_> = Box::pin(registry.execute_async_with_call_id(
+                    &call.fn_name,
+                    &call.fn_arguments,
+                    Some(&call_id),
+                ));
                 match registry.turn_observer() {
                     Some(observer) => observer.wrap_tool_call(&call.fn_name, inner).await,
                     None => inner.await,

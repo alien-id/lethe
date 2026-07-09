@@ -165,6 +165,27 @@ pub struct BackgroundConfig {
     pub proactive_cooldown_minutes: u32,
 }
 
+/// Connection to the trusted capability gateway exposed by lethe-hosted.
+/// Empty values keep standalone Lethe completely local. Hosted deployments
+/// inject one user-scoped credential which discovers every enabled plugin;
+/// individual plugins never need their own environment variables.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct HostedPluginsConfig {
+    pub api_base: String,
+    pub api_token: String,
+    /// Hosted Agenda is authoritative when this is true. Local todo tools and
+    /// the local active-tasks prompt are hidden even during a gateway outage,
+    /// preventing an invisible split-brain task list.
+    pub replace_local_todos: bool,
+    pub catalog_ttl_seconds: u64,
+}
+
+impl HostedPluginsConfig {
+    pub fn enabled(&self) -> bool {
+        !self.api_base.trim().is_empty() && !self.api_token.trim().is_empty()
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Settings {
     pub agent_name: String,
@@ -175,6 +196,7 @@ pub struct Settings {
     pub api: ApiServerConfig,
     pub transcription: TranscriptionConfig,
     pub background: BackgroundConfig,
+    pub hosted_plugins: HostedPluginsConfig,
 }
 
 impl Settings {
@@ -255,6 +277,14 @@ impl Settings {
                 debounce_seconds: env_f64("DEBOUNCE_SECONDS", 5.0),
                 proactive_max_per_day: env_u32("PROACTIVE_MAX_PER_DAY", 4),
                 proactive_cooldown_minutes: env_u32("PROACTIVE_COOLDOWN_MINUTES", 60),
+            },
+            hosted_plugins: HostedPluginsConfig {
+                api_base: env_string("LETHE_HOSTED_API_BASE", "")
+                    .trim_end_matches('/')
+                    .to_string(),
+                api_token: env_string("LETHE_HOSTED_API_TOKEN", ""),
+                replace_local_todos: env_bool("LETHE_HOSTED_DISABLE_LOCAL_TODOS", false),
+                catalog_ttl_seconds: env_u64("LETHE_HOSTED_CATALOG_TTL", 30),
             },
             paths,
         }
@@ -396,6 +426,12 @@ pub fn test_settings(root: &std::path::Path) -> Settings {
             proactive_max_per_day: 4,
             proactive_cooldown_minutes: 60,
         },
+        hosted_plugins: HostedPluginsConfig {
+            api_base: String::new(),
+            api_token: String::new(),
+            replace_local_todos: false,
+            catalog_ttl_seconds: 30,
+        },
     }
 }
 
@@ -426,5 +462,15 @@ mod tests {
         assert_eq!(settings.effective_tool_model(), "");
         settings.llm.llm_model_tool = "  deepseek/deepseek-v4-pro  ".to_string();
         assert_eq!(settings.effective_tool_model(), "deepseek/deepseek-v4-pro");
+    }
+
+    #[test]
+    fn hosted_plugins_require_both_base_and_token() {
+        let mut settings = test_settings(std::path::Path::new("/tmp/lethe"));
+        assert!(!settings.hosted_plugins.enabled());
+        settings.hosted_plugins.api_base = "http://host/hosted/v1".to_string();
+        assert!(!settings.hosted_plugins.enabled());
+        settings.hosted_plugins.api_token = "secret".to_string();
+        assert!(settings.hosted_plugins.enabled());
     }
 }

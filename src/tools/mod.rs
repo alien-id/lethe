@@ -1,6 +1,7 @@
 pub mod agent_id;
 pub mod browser;
 pub mod filesystem;
+pub mod hosted_plugins;
 pub mod image;
 pub mod knowledge_graph;
 pub mod registry;

@@ -5,6 +5,7 @@ use tempfile::tempdir;
 
 use super::*;
 use crate::memory::MemoryStore;
+use crate::tools::hosted_plugins::{HostedPluginClient, RemoteToolDef, RemoteToolExposure};
 use crate::tools::shell::ShellTools;
 use crate::tools::web::WebTools;
 
@@ -101,6 +102,68 @@ fn active_tool_specs_start_small_and_expand_on_request() {
         .collect::<Vec<_>>();
     assert!(expanded.contains(&"browser_open".to_string()));
     assert!(expanded.contains(&"fetch_webpage".to_string()));
+}
+
+#[test]
+fn hosted_tools_replace_local_defs_and_join_requestable_groups() {
+    let (_tmp, memory, shell) = registry();
+    let hosted = HostedPluginClient::with_catalog_for_test(
+        vec![
+            RemoteToolDef {
+                plugin_id: "agenda".to_string(),
+                name: "todo_list".to_string(),
+                description: "List hosted todos".to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {"limit": {"type": "integer"}},
+                    "additionalProperties": false,
+                }),
+                exposure: RemoteToolExposure::Requestable,
+                group: Some("agenda.todos".to_string()),
+                replaces: vec!["todo_remind_check".to_string()],
+                mutating: false,
+            },
+            RemoteToolDef {
+                plugin_id: "agenda".to_string(),
+                name: "todo_reopen".to_string(),
+                description: "Reopen a hosted todo".to_string(),
+                input_schema: json!({"type": "object", "properties": {}}),
+                exposure: RemoteToolExposure::Requestable,
+                group: Some("agenda.todos".to_string()),
+                replaces: Vec::new(),
+                mutating: true,
+            },
+        ],
+        false,
+    );
+    let registry = ToolRegistry::with_runtime(
+        &memory,
+        memory.workspace_dir(),
+        "/tmp/lethe-cache",
+        &shell,
+        ToolRuntime {
+            hosted_plugins: Some(hosted),
+            ..ToolRuntime::default()
+        },
+    );
+
+    let all = registry.tools();
+    assert_eq!(
+        all.iter().filter(|tool| tool.name == "todo_list").count(),
+        1,
+        "remote todo_list must replace, not duplicate, the local schema"
+    );
+    assert!(all.iter().any(|tool| tool.name == "todo_reopen"));
+    assert!(!all.iter().any(|tool| tool.name == "todo_remind_check"));
+    assert_eq!(
+        registry.group_siblings("todo_list"),
+        vec!["todo_reopen".to_string()]
+    );
+    assert!(
+        registry
+            .requestable_tools_directory()
+            .contains("todo_reopen — Reopen a hosted todo")
+    );
 }
 
 #[test]

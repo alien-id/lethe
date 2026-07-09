@@ -34,6 +34,7 @@ use crate::memory::messages::{MessageHistoryError, MessageRole, StoredMessage};
 use crate::memory::recall::{Hippocampus, HippocampusConfig, HippocampusError};
 use crate::memory::{MemoryStore, MemoryStoreError};
 use crate::scheduler::curator::{CuratorError, CuratorRunStats, MemoryCurator};
+use crate::tools::hosted_plugins::HostedPluginClient;
 use crate::tools::registry::{
     ActorToolContext, SharedActorRegistry, ToolRuntime, requestable_tools_directory_for,
 };
@@ -166,6 +167,7 @@ pub struct Agent {
     /// batch has been merged into it (the old detached spawn raced exactly
     /// that way and lost context silently).
     pending_summary: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+    hosted_plugins: Option<Arc<HostedPluginClient>>,
 }
 
 /// How long the next turn waits for the previous turn's summary update before
@@ -206,6 +208,7 @@ impl Agent {
         ))));
         let shell = ShellTools::new(&settings.paths.workspace_dir);
         let last_prompt_tokens = Arc::new(AtomicU64::new(0));
+        let hosted_plugins = HostedPluginClient::from_config(&settings.hosted_plugins);
         let (actor_registry, principal_actor_id) = if settings.background.actors_enabled {
             let mut registry = ActorRegistry::new();
             registry.set_prompts(prompts.clone());
@@ -233,6 +236,7 @@ impl Agent {
                     router.clone(),
                     shell.clone(),
                     last_prompt_tokens.clone(),
+                    hosted_plugins.clone(),
                 ))
                 .map_err(|error| AgentError::Llm(anyhow!("actor runtime failed: {error}")))?;
             (Some(runtime), Some(principal_id))
@@ -252,6 +256,7 @@ impl Agent {
             last_prompt_tokens,
             conversation_tx: broadcast::channel(CONVERSATION_EVENT_DEPTH).0,
             pending_summary: tokio::sync::Mutex::new(None),
+            hosted_plugins,
         })
     }
 
@@ -332,6 +337,22 @@ impl Agent {
         // Sync point: the prompt reads the conversation_summary block, so let
         // the previous turn's in-flight summary update land first (bounded).
         await_pending_task(&self.pending_summary, SUMMARY_SYNC_TIMEOUT).await;
+        let hosted_context = if let Some(client) = self.hosted_plugins.as_ref() {
+            if let Err(error) = client.refresh_catalog().await {
+                tracing::warn!(error = %error, "hosted plugin catalog refresh failed during prompt assembly");
+            }
+            match client.context_blocks().await {
+                Ok(context) => context,
+                Err(error) => {
+                    // Plugin context is volatile convenience, never a reason to
+                    // fail the user's chat turn.
+                    tracing::warn!(error = %error, "hosted plugin context unavailable");
+                    String::new()
+                }
+            }
+        } else {
+            String::new()
+        };
         let mut request_options = req.options.clone();
         let last_prompt_tokens = match self.last_prompt_tokens.load(Ordering::Relaxed) {
             0 => None,
@@ -364,6 +385,12 @@ impl Agent {
             system.content.push_str(&context);
             system.content.push_str("\n</actor_context>");
         }
+        if !hosted_context.trim().is_empty()
+            && let Some(system) = volatile_system_message_mut(&mut turn.messages)
+        {
+            system.content.push_str("\n\n");
+            system.content.push_str(hosted_context.trim());
+        }
         let directory = self.requestable_tools_directory_async(req).await?;
         if !directory.is_empty()
             && let Some(system) = volatile_system_message_mut(&mut turn.messages)
@@ -376,12 +403,27 @@ impl Agent {
 
     async fn requestable_tools_directory_async(&self, req: &TurnRequest) -> AgentResult<String> {
         if let (Some(registry), Some(actor_id)) = (&self.actor_registry, &self.principal_actor_id) {
-            return registry
+            let mut directory = registry
                 .build_requestable_directory(actor_id)
                 .await
                 .map_err(|error| {
                     AgentError::Llm(anyhow!("requestable directory failed: {error}"))
-                });
+                })?;
+            if let Some(client) = self.hosted_plugins.as_ref() {
+                directory = client.filter_requestable_directory(&directory);
+                let hosted = client.requestable_directory();
+                if !hosted.is_empty() {
+                    if !directory.is_empty() {
+                        directory.push_str("\n\n");
+                    }
+                    directory.push_str(
+                        "<available_on_request source=\"hosted_plugins\">\nTools below are NOT loaded. Call request_tool(name=...) to enable one for this turn.\n",
+                    );
+                    directory.push_str(&hosted);
+                    directory.push_str("\n</available_on_request>");
+                }
+            }
+            return Ok(directory);
         }
         let runtime = self.with_actor_runtime(req.runtime.clone());
         let body = requestable_tools_directory_for(&runtime);
@@ -512,10 +554,22 @@ impl Agent {
                 }
             }
         }
-        match self.memory.todos.open_work_digest(20) {
-            Ok(digest) if !digest.trim().is_empty() => lines.push(digest),
-            Ok(_) => {}
-            Err(error) => tracing::warn!(error = %error, "todo open-work digest failed"),
+        if self.settings.hosted_plugins.replace_local_todos {
+            if let Some(client) = self.hosted_plugins.as_ref() {
+                match client.context_blocks().await {
+                    Ok(context) if !context.trim().is_empty() => lines.push(context),
+                    Ok(_) => {}
+                    Err(error) => {
+                        tracing::warn!(error = %error, "hosted open-work context failed")
+                    }
+                }
+            }
+        } else {
+            match self.memory.todos.open_work_digest(20) {
+                Ok(digest) if !digest.trim().is_empty() => lines.push(digest),
+                Ok(_) => {}
+                Err(error) => tracing::warn!(error = %error, "todo open-work digest failed"),
+            }
         }
         lines.join("\n")
     }
@@ -646,6 +700,9 @@ impl Agent {
                 is_subagent: false,
             });
         }
+        if runtime.hosted_plugins.is_none() {
+            runtime.hosted_plugins = self.hosted_plugins.clone();
+        }
         runtime
     }
 
@@ -685,6 +742,7 @@ impl Agent {
                 router: self.router.clone(),
                 shell: self.shell.clone(),
                 last_prompt_tokens: self.last_prompt_tokens.clone(),
+                hosted_plugins: self.hosted_plugins.clone(),
             },
             messages,
             runtime,
@@ -723,7 +781,12 @@ pub fn prepare_turn(
         None
     };
 
-    let parts = build_system_prompt(memory, prompts, recall.as_deref())?;
+    let parts = build_system_prompt(
+        memory,
+        prompts,
+        recall.as_deref(),
+        !settings.hosted_plugins.replace_local_todos,
+    )?;
     let dialect = dialect_for_model(&settings.llm.llm_model);
     let mut messages = parts.into_messages();
     apply_cache_markers(&mut messages, dialect.as_ref());
@@ -798,6 +861,7 @@ fn build_system_prompt(
     memory: &MemoryStore,
     prompts: &PromptStore,
     recall: Option<&str>,
+    include_local_active_tasks: bool,
 ) -> AgentResult<SystemParts> {
     let identity = memory
         .blocks
@@ -824,17 +888,19 @@ fn build_system_prompt(
     // every turn so unfinished work survives context compaction and session
     // restarts without the model having to remember to call todo_list. Text
     // comes from the overridable `active_tasks` template.
-    match memory.todos.open_work_digest(ACTIVE_TASKS_PROMPT_LIMIT) {
-        Ok(digest) if !digest.trim().is_empty() => {
-            let mut variables = std::collections::HashMap::new();
-            variables.insert("digest".to_string(), digest);
-            let body = prompts
-                .render("active_tasks", &variables, "Your open work:\n{digest}")
-                .text;
-            volatile_builder.block("active_tasks", body);
+    if include_local_active_tasks {
+        match memory.todos.open_work_digest(ACTIVE_TASKS_PROMPT_LIMIT) {
+            Ok(digest) if !digest.trim().is_empty() => {
+                let mut variables = std::collections::HashMap::new();
+                variables.insert("digest".to_string(), digest);
+                let body = prompts
+                    .render("active_tasks", &variables, "Your open work:\n{digest}")
+                    .text;
+                volatile_builder.block("active_tasks", body);
+            }
+            Ok(_) => {}
+            Err(error) => tracing::warn!(error = %error, "active-tasks digest failed"),
         }
-        Ok(_) => {}
-        Err(error) => tracing::warn!(error = %error, "active-tasks digest failed"),
     }
     volatile_builder.raw(memory_volatile).raw(clock_block);
 
@@ -1647,6 +1713,46 @@ mod tests {
         assert!(system.contains("<active_tasks>"));
         assert!(system.contains("finish the migration plan"));
         assert!(system.contains("[in_progress]"));
+    }
+
+    #[test]
+    fn hosted_agenda_suppresses_local_active_tasks_prompt() {
+        let tmp = tempdir().unwrap();
+        let mut settings = settings(tmp.path());
+        settings.hosted_plugins.replace_local_todos = true;
+        let memory = MemoryStore::from_settings(&settings).unwrap();
+        let prompts = PromptStore::new(&settings.paths.workspace_dir, &settings.paths.config_dir);
+        let id = memory
+            .todos
+            .create(crate::todos::NewTodo {
+                title: "local split-brain task".to_string(),
+                ..Default::default()
+            })
+            .unwrap();
+        memory
+            .todos
+            .update(
+                id,
+                crate::todos::TodoUpdate {
+                    status: Some(crate::todos::TodoStatus::InProgress),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        let turn = prepare_turn(
+            &settings,
+            &memory,
+            &prompts,
+            "hello",
+            Vec::new(),
+            None,
+            &AgentOptions::default(),
+        )
+        .unwrap();
+        let system = system_content(&turn.messages);
+        assert!(!system.contains("<active_tasks>"));
+        assert!(!system.contains("local split-brain task"));
     }
 
     #[test]

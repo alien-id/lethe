@@ -1,5 +1,6 @@
 use genai::chat::Tool;
 
+use crate::tools::hosted_plugins::RemoteToolExposure;
 use crate::tools::spec::{ToolCategory, ToolDef};
 use crate::tools::{agent_id, browser, filesystem, image, knowledge_graph, research, shell, web};
 
@@ -29,10 +30,25 @@ pub fn find_def(name: &str) -> Option<&'static ToolDef> {
 
 impl<'a> ToolRegistry<'a> {
     pub fn tools(&self) -> Vec<Tool> {
-        all_defs()
+        let mut tools = all_defs()
             .filter(|def| self.def_is_visible(def))
+            .filter(|def| {
+                !self
+                    .runtime
+                    .hosted_plugins
+                    .as_ref()
+                    .is_some_and(|client| client.replaces_builtin(def.name))
+            })
             .map(ToolDef::to_genai_tool)
-            .collect()
+            .collect::<Vec<_>>();
+        if let Some(client) = self.runtime.hosted_plugins.as_ref() {
+            tools.extend(client.tools().into_iter().map(|tool| {
+                Tool::new(tool.name)
+                    .with_description(tool.description)
+                    .with_schema(tool.input_schema)
+            }));
+        }
+        tools
     }
 
     /// A def is visible (offered to the model in any form) when its category is
@@ -92,5 +108,13 @@ impl<'a> ToolRegistry<'a> {
             .actor
             .as_ref()
             .is_some_and(|context| context.is_subagent)
+    }
+
+    pub(super) fn remote_is_initial(&self, name: &str) -> bool {
+        self.runtime
+            .hosted_plugins
+            .as_ref()
+            .and_then(|client| client.tool(name))
+            .is_some_and(|tool| tool.exposure == RemoteToolExposure::Initial)
     }
 }

@@ -5,6 +5,7 @@ use crate::interfaces::telegram::TelegramToolContext;
 use crate::memory::MemoryStore;
 use crate::tools::browser::BrowserTools;
 use crate::tools::filesystem::FileTools;
+use crate::tools::hosted_plugins::HostedPluginClient;
 use crate::tools::image::ImageTools;
 use crate::tools::shell::ShellTools;
 use crate::tools::web::WebTools;
@@ -48,6 +49,10 @@ pub struct ToolRuntime {
     /// end-to-end-sealed credential cards in the frontend and emit identity
     /// lifecycle events.
     pub secure_prompt: Option<crate::agent_id::secure_prompt::SecurePromptHub>,
+    /// Trusted remote tools advertised by the lethe-hosted plugin gateway.
+    /// The client owns a short-lived catalog cache, so the synchronous schema
+    /// assembly path never performs network I/O.
+    pub hosted_plugins: Option<std::sync::Arc<HostedPluginClient>>,
     pub requested_tools: Vec<String>,
 }
 
@@ -59,6 +64,7 @@ impl std::fmt::Debug for ToolRuntime {
             .field("actor", &self.actor.is_some())
             .field("observer", &self.observer.is_some())
             .field("secure_prompt", &self.secure_prompt.is_some())
+            .field("hosted_plugins", &self.hosted_plugins.is_some())
             .field("requested_tools", &self.requested_tools)
             .finish()
     }
@@ -122,6 +128,22 @@ impl<'a> ToolRegistry<'a> {
 
     pub fn tool_is_available(&self, name: &str) -> bool {
         let name = name.trim();
+        if self
+            .runtime
+            .hosted_plugins
+            .as_ref()
+            .is_some_and(|client| client.tool(name).is_some())
+        {
+            return true;
+        }
+        if self
+            .runtime
+            .hosted_plugins
+            .as_ref()
+            .is_some_and(|client| client.replaces_builtin(name))
+        {
+            return false;
+        }
         find_def(name).is_some_and(|def| self.def_is_visible(def))
     }
 
@@ -136,9 +158,28 @@ impl<'a> ToolRegistry<'a> {
     pub fn requestable_tool_names(&self) -> Vec<String> {
         let mut names = catalog::all_defs()
             .filter(|def| self.def_is_visible(def) && !self.def_is_initial(def))
+            .filter(|def| {
+                !self
+                    .runtime
+                    .hosted_plugins
+                    .as_ref()
+                    .is_some_and(|client| client.replaces_builtin(def.name))
+            })
             .filter(|def| def.name != "request_tool")
             .map(|def| def.name.to_string())
             .collect::<Vec<_>>();
+        if let Some(client) = self.runtime.hosted_plugins.as_ref() {
+            names.extend(
+                client
+                    .tools()
+                    .into_iter()
+                    .filter(|tool| {
+                        tool.exposure
+                            == crate::tools::hosted_plugins::RemoteToolExposure::Requestable
+                    })
+                    .map(|tool| tool.name),
+            );
+        }
         names.sort();
         names.dedup();
         names
@@ -159,6 +200,11 @@ impl<'a> ToolRegistry<'a> {
     pub fn group_siblings(&self, name: &str) -> Vec<String> {
         use crate::tools::spec::ToolCategory;
         let name = name.trim();
+        if let Some(client) = self.runtime.hosted_plugins.as_ref()
+            && client.tool(name).is_some()
+        {
+            return client.group_siblings(name);
+        }
         let Some(def) = find_def(name) else {
             return Vec::new();
         };
@@ -195,7 +241,7 @@ pub struct ToolContextShape {
 }
 
 pub fn requestable_tools_directory_for(runtime: &ToolRuntime) -> String {
-    requestable_tools_directory_for_shape(ToolContextShape {
+    let builtin = requestable_tools_directory_for_shape(ToolContextShape {
         has_actor: runtime.actor.is_some(),
         is_subagent: runtime
             .actor
@@ -203,7 +249,26 @@ pub fn requestable_tools_directory_for(runtime: &ToolRuntime) -> String {
             .is_some_and(|context| context.is_subagent),
         has_telegram: runtime.telegram.is_some(),
         has_client: runtime.client.is_some(),
-    })
+    });
+    let Some(client) = runtime.hosted_plugins.as_ref() else {
+        return builtin;
+    };
+    let mut lines = builtin
+        .lines()
+        .filter(|line| {
+            let name = line
+                .strip_prefix("- ")
+                .and_then(|line| line.split_once(" — "))
+                .map(|(name, _)| name)
+                .unwrap_or("");
+            !client.replaces_builtin(name)
+        })
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    lines.extend(client.requestable_directory().lines().map(str::to_string));
+    lines.sort();
+    lines.dedup();
+    lines.join("\n")
 }
 
 pub fn requestable_tools_directory_for_shape(shape: ToolContextShape) -> String {
@@ -251,6 +316,17 @@ pub fn requestable_tools_directory_for_shape(shape: ToolContextShape) -> String 
 
 impl<'a> ToolRegistry<'a> {
     pub(super) fn is_initial_tool(&self, name: &str) -> bool {
+        if self.remote_is_initial(name) {
+            return true;
+        }
+        if self
+            .runtime
+            .hosted_plugins
+            .as_ref()
+            .is_some_and(|client| client.replaces_builtin(name))
+        {
+            return false;
+        }
         find_def(name).is_some_and(|def| self.def_is_initial(def))
     }
 }
