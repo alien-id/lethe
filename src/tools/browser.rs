@@ -41,9 +41,13 @@ impl BrowserTools {
     fn with_lifecycle(cache_dir: impl Into<PathBuf>, close_on_drop: bool) -> Self {
         let profile_dir = cache_dir.into().join("browser");
         let digest = Sha256::digest(profile_dir.to_string_lossy().as_bytes());
+        let session_suffix = digest[..8]
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
         Self {
             profile_dir,
-            session_name: format!("lethe-{digest:x}"),
+            session_name: format!("lethe-{session_suffix}"),
             close_on_drop,
             used: Arc::new(AtomicBool::new(false)),
         }

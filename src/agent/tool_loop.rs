@@ -88,7 +88,17 @@ fn skip_tool_log(name: &str) -> bool {
 }
 
 fn is_error_result(result: &str) -> bool {
-    result.starts_with("Error:") || result.starts_with("Unknown tool:")
+    result.starts_with("Error:")
+        || result.starts_with("Unknown tool:")
+        || serde_json::from_str::<serde_json::Value>(result)
+            .ok()
+            .and_then(|value| {
+                value
+                    .get("status")
+                    .and_then(|status| status.as_str())
+                    .map(str::to_owned)
+            })
+            .is_some_and(|status| status.eq_ignore_ascii_case("error"))
 }
 
 /// Transient failures — the kind that often succeed on a later attempt
@@ -1155,6 +1165,10 @@ mod tests {
     fn is_error_result_detects_standard_error_prefixes() {
         assert!(is_error_result("Error: file not found"));
         assert!(is_error_result("Unknown tool: foo"));
+        assert!(is_error_result(
+            r#"{"status":"error","message":"browser failed"}"#
+        ));
+        assert!(!is_error_result(r#"{"status":"OK","message":"opened"}"#));
         assert!(!is_error_result("Successfully wrote 12 bytes"));
         assert!(!is_error_result(""));
     }
