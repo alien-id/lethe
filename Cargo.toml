@@ -10,7 +10,8 @@ name = "lethe"
 path = "src/lib.rs"
 
 [features]
-default = []
+default = ["fastembed"]
+fastembed = ["dep:fastembed", "dep:hf-hub"]
 postgres-memory = ["dep:postgres", "dep:r2d2", "dep:r2d2_postgres"]
 
 [[bin]]
@@ -29,11 +30,11 @@ clap_complete = "4.5"
 crossterm = { version = "0.28", features = ["event-stream"] }
 dotenvy = "0.15"
 eventsource-stream = "0.2"
-fastembed = "5.13"
+fastembed = { version = "5.13", optional = true }
 futures-util = "0.3"
 genai = "0.5.3"
 glob = "0.3"
-hf-hub = "0.5"
+hf-hub = { version = "0.5", optional = true }
 hkdf = "0.12"
 kameo = "0.20"
 libc = "0.2"

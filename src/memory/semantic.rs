@@ -1,14 +1,23 @@
 use std::collections::hash_map::DefaultHasher;
+#[cfg(feature = "fastembed")]
 use std::fs;
 use std::hash::{Hash, Hasher};
-use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::path::Path;
+#[cfg(feature = "fastembed")]
+use std::path::PathBuf;
+use std::sync::Arc;
+#[cfg(feature = "fastembed")]
+use std::sync::Mutex;
 
-use anyhow::{Context, Result, anyhow, bail};
+#[cfg(feature = "fastembed")]
+use anyhow::{Context, bail};
+use anyhow::{Result, anyhow};
+#[cfg(feature = "fastembed")]
 use fastembed::{
     EmbeddingModel, InitOptions, InitOptionsUserDefined, OutputKey, QuantizationMode,
     TextEmbedding, TokenizerFiles, UserDefinedEmbeddingModel,
 };
+#[cfg(feature = "fastembed")]
 use hf_hub::api::sync::ApiBuilder;
 use serde::{Deserialize, Serialize};
 
@@ -49,7 +58,11 @@ impl SemanticIndexConfig {
             enabled: env_bool("LETHE_SEMANTIC_SEARCH_ENABLED", true),
             provider: env_string(
                 "LETHE_EMBEDDING_PROVIDER",
-                if cfg!(test) { "hash" } else { "fastembed" },
+                if cfg!(test) || !cfg!(feature = "fastembed") {
+                    "hash"
+                } else {
+                    "fastembed"
+                },
             ),
             model: env_string("LETHE_EMBEDDING_MODEL", LEGACY_EMBEDDING_MODEL),
         }
@@ -115,12 +128,14 @@ pub trait TextEmbedder: Send + Sync {
     fn embed_query(&self, text: &str) -> Result<Vec<f32>>;
 }
 
+#[cfg(feature = "fastembed")]
 struct FastEmbedTextEmbedder {
     model_name: String,
     cache_dir: PathBuf,
     model: Mutex<Option<TextEmbedding>>,
 }
 
+#[cfg(feature = "fastembed")]
 impl FastEmbedTextEmbedder {
     fn new(model_name: impl Into<String>, cache_dir: impl Into<PathBuf>) -> Self {
         Self {
@@ -154,6 +169,7 @@ impl FastEmbedTextEmbedder {
     }
 }
 
+#[cfg(feature = "fastembed")]
 impl TextEmbedder for FastEmbedTextEmbedder {
     fn embed_documents(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
         let inputs = texts
@@ -222,16 +238,26 @@ impl TextEmbedder for HashTextEmbedder {
     }
 }
 
-fn embedder_for_config(config: &SemanticIndexConfig, root: &Path) -> Box<dyn TextEmbedder> {
+fn embedder_for_config(config: &SemanticIndexConfig, _root: &Path) -> Box<dyn TextEmbedder> {
     match config.provider.trim().to_ascii_lowercase().as_str() {
         "hash" => Box::new(HashTextEmbedder::new(LEGACY_EMBEDDING_DIMENSIONS)),
+        #[cfg(feature = "fastembed")]
         _ => Box::new(FastEmbedTextEmbedder::new(
             config.model.clone(),
-            root.join("models"),
+            _root.join("models"),
         )),
+        #[cfg(not(feature = "fastembed"))]
+        provider => {
+            tracing::warn!(
+                provider,
+                "local FastEmbed support is not compiled in; using hash embeddings"
+            );
+            Box::new(HashTextEmbedder::new(LEGACY_EMBEDDING_DIMENSIONS))
+        }
     }
 }
 
+#[cfg(feature = "fastembed")]
 fn parse_fastembed_model(model: &str) -> Result<EmbeddingModel> {
     match model.trim().to_ascii_lowercase().as_str() {
         "" | "all-minilm-l6-v2" | "all_minilm_l6_v2" => Ok(EmbeddingModel::AllMiniLML6V2),
@@ -246,6 +272,7 @@ fn parse_fastembed_model(model: &str) -> Result<EmbeddingModel> {
     }
 }
 
+#[cfg(feature = "fastembed")]
 fn is_legacy_snowflake_model(model: &str) -> bool {
     matches!(
         model.trim().to_ascii_lowercase().as_str(),
@@ -253,6 +280,7 @@ fn is_legacy_snowflake_model(model: &str) -> bool {
     )
 }
 
+#[cfg(feature = "fastembed")]
 fn legacy_snowflake_embedder(cache_dir: &Path) -> Result<TextEmbedding> {
     let repo = ApiBuilder::new()
         .with_cache_dir(cache_dir.to_path_buf())
