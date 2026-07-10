@@ -31,6 +31,8 @@ pub enum MessageHistoryError {
     Sqlite(#[from] rusqlite::Error),
     #[error(transparent)]
     Embedding(#[from] anyhow::Error),
+    #[error("storage backend error: {0}")]
+    Backend(String),
 }
 
 pub type MessageHistoryResult<T> = Result<T, MessageHistoryError>;
@@ -522,7 +524,7 @@ fn row_to_message(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredMessage> {
     })
 }
 
-fn compare_messages(left: &StoredMessage, right: &StoredMessage) -> Ordering {
+pub(crate) fn compare_messages(left: &StoredMessage, right: &StoredMessage) -> Ordering {
     right
         .score
         .partial_cmp(&left.score)
@@ -537,7 +539,7 @@ fn parse_time(value: &str) -> Option<DateTime<Utc>> {
         .map(|time| time.with_timezone(&Utc))
 }
 
-fn score_message(query: &str, terms: &[String], message: &StoredMessage) -> f64 {
+pub(crate) fn score_message(query: &str, terms: &[String], message: &StoredMessage) -> f64 {
     if terms.is_empty() {
         return 1.0;
     }

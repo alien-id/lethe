@@ -3,10 +3,13 @@ mod db;
 mod search;
 
 pub mod archival;
+pub mod backend;
 pub mod blocks;
 pub mod message_metadata;
 pub mod messages;
 pub mod notes;
+#[cfg(feature = "postgres-memory")]
+pub mod postgres;
 pub mod recall;
 pub mod semantic;
 pub mod store;
@@ -14,6 +17,7 @@ pub mod store;
 pub use db::{MemoryDb, MemoryKind, MemoryRow, NewMemoryRow, ScoredRow};
 
 pub use archival::{ArchivalEntry, ArchivalError, ArchivalMemory, ArchivalResult};
+pub use backend::{ArchivalStorage, BlockStorage, MessageStorage, NoteStorage, TodoStorage};
 pub use blocks::{
     BlockManager, BlockMetadata, DEFAULT_BLOCK_LIMIT, MemoryBlock, MemoryError, MemoryResult,
 };

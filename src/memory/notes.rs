@@ -29,6 +29,8 @@ pub enum NoteError {
     Sqlite(#[from] rusqlite::Error),
     #[error(transparent)]
     Embedding(#[from] anyhow::Error),
+    #[error("storage backend error: {0}")]
+    Backend(String),
 }
 
 pub type NoteResult<T> = Result<T, NoteError>;
@@ -452,7 +454,7 @@ fn build_note_row(path: &Path, db: &MemoryDb) -> NoteResult<NewMemoryRow> {
     })
 }
 
-fn compare_search_results(left: &NoteSearchResult, right: &NoteSearchResult) -> Ordering {
+pub(crate) fn compare_search_results(left: &NoteSearchResult, right: &NoteSearchResult) -> Ordering {
     right
         .score
         .partial_cmp(&left.score)
@@ -461,7 +463,13 @@ fn compare_search_results(left: &NoteSearchResult, right: &NoteSearchResult) -> 
         .then_with(|| left.title.cmp(&right.title))
 }
 
-fn score_note(query: &str, terms: &[String], title: &str, tags: &[String], body: &str) -> f64 {
+pub(crate) fn score_note(
+    query: &str,
+    terms: &[String],
+    title: &str,
+    tags: &[String],
+    body: &str,
+) -> f64 {
     if terms.is_empty() {
         return 1.0;
     }
@@ -609,7 +617,7 @@ fn parse_tag_value(value: &str) -> Vec<String> {
     }
 }
 
-fn preview(body: &str) -> String {
+pub(crate) fn preview(body: &str) -> String {
     body.chars().take(300).collect()
 }
 

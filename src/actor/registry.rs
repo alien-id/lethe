@@ -14,6 +14,7 @@ fn requestable_directory_for_actor(actor: &Actor) -> String {
         is_subagent: !actor.is_principal,
         has_telegram: false,
         has_client: false,
+        policy: crate::tools::registry::ToolPolicy::Full,
     })
 }
 

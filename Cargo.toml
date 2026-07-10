@@ -9,6 +9,10 @@ license = "MIT"
 name = "lethe"
 path = "src/lib.rs"
 
+[features]
+default = []
+postgres-memory = ["dep:postgres", "dep:r2d2", "dep:r2d2_postgres"]
+
 [[bin]]
 name = "lethe"
 path = "src/main.rs"
@@ -35,7 +39,10 @@ kameo = "0.20"
 libc = "0.2"
 p256 = { version = "0.13", features = ["ecdh"] }
 portable-pty = "0.8"
+postgres = { version = "0.19", features = ["with-chrono-0_4", "with-serde_json-1", "with-uuid-1"], optional = true }
 pulldown-cmark = { version = "0.12", default-features = false }
+r2d2 = { version = "0.8", optional = true }
+r2d2_postgres = { version = "0.18", optional = true }
 rand = "0.9"
 ratatui = { version = "0.29", default-features = false, features = ["crossterm", "unstable-rendered-line-info"] }
 regex = "1.12"

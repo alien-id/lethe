@@ -32,6 +32,35 @@ mod tests;
 
 pub type SharedActorRegistry = ActorRuntime;
 
+/// Controls which built-in capabilities exist for a turn. `HostedSafe` is an
+/// allowlist enforced both while schemas are assembled and again at dispatch,
+/// so a model cannot invoke a hidden local capability by name. It retains the
+/// headless browser family; callers must provide tenant-private cache paths.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ToolPolicy {
+    #[default]
+    Full,
+    HostedSafe,
+}
+
+impl ToolPolicy {
+    fn allows_builtin(self, name: &str) -> bool {
+        match self {
+            Self::Full => true,
+            Self::HostedSafe => {
+                name == "request_tool"
+                    || name == "chat_send_message"
+                    || name.starts_with("memory_")
+                    || name.starts_with("archival_")
+                    || name.starts_with("conversation_")
+                    || name.starts_with("note_")
+                    || name.starts_with("todo_")
+                    || name.starts_with("browser_")
+            }
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct ActorToolContext {
     pub runtime: SharedActorRegistry,
@@ -53,6 +82,9 @@ pub struct ToolRuntime {
     /// The client owns a short-lived catalog cache, so the synchronous schema
     /// assembly path never performs network I/O.
     pub hosted_plugins: Option<std::sync::Arc<HostedPluginClient>>,
+    /// Capability boundary for the current turn. Hosted multiplexers use the
+    /// allowlisted policy; the standalone binary retains the full catalog.
+    pub policy: ToolPolicy,
     pub requested_tools: Vec<String>,
 }
 
@@ -65,6 +97,7 @@ impl std::fmt::Debug for ToolRuntime {
             .field("observer", &self.observer.is_some())
             .field("secure_prompt", &self.secure_prompt.is_some())
             .field("hosted_plugins", &self.hosted_plugins.is_some())
+            .field("policy", &self.policy)
             .field("requested_tools", &self.requested_tools)
             .finish()
     }
@@ -106,13 +139,18 @@ impl<'a> ToolRegistry<'a> {
     ) -> Self {
         let workspace_dir = workspace_dir.into();
         let cache_dir = cache_dir.into();
+        let browser = if runtime.policy == ToolPolicy::HostedSafe {
+            BrowserTools::hosted(cache_dir.clone())
+        } else {
+            BrowserTools::new(cache_dir.clone())
+        };
         Self {
             memory,
             files: FileTools::new(workspace_dir.clone()),
             image: ImageTools::new(workspace_dir),
             shell,
             web: WebTools::new(cache_dir.clone()),
-            browser: BrowserTools::new(cache_dir),
+            browser,
             runtime,
         }
     }
@@ -238,6 +276,7 @@ pub struct ToolContextShape {
     pub has_telegram: bool,
     /// Client (web/desktop chat) transport attached (neutral chat egress).
     pub has_client: bool,
+    pub policy: ToolPolicy,
 }
 
 pub fn requestable_tools_directory_for(runtime: &ToolRuntime) -> String {
@@ -249,6 +288,7 @@ pub fn requestable_tools_directory_for(runtime: &ToolRuntime) -> String {
             .is_some_and(|context| context.is_subagent),
         has_telegram: runtime.telegram.is_some(),
         has_client: runtime.client.is_some(),
+        policy: runtime.policy,
     });
     let Some(client) = runtime.hosted_plugins.as_ref() else {
         return builtin;
@@ -278,6 +318,7 @@ pub fn requestable_tools_directory_for_shape(shape: ToolContextShape) -> String 
         is_subagent,
         has_telegram,
         has_client,
+        policy,
     } = shape;
 
     let visible = |def: &crate::tools::spec::ToolDef| match def.category {
@@ -291,7 +332,7 @@ pub fn requestable_tools_directory_for_shape(shape: ToolContextShape) -> String 
         ToolCategory::KnowledgeGraph => crate::tools::knowledge_graph::is_configured(),
         ToolCategory::AgentId => crate::agent_id::vault_tools_available(),
         ToolCategory::AgentIdBrowser => crate::agent_id::browser_tools_available(),
-    };
+    } && policy.allows_builtin(def.name);
     let initial = |def: &crate::tools::spec::ToolDef| match def.category {
         ToolCategory::Initial => true,
         ToolCategory::Requestable | ToolCategory::BrowserBuiltin => false,
@@ -328,5 +369,9 @@ impl<'a> ToolRegistry<'a> {
             return false;
         }
         find_def(name).is_some_and(|def| self.def_is_initial(def))
+    }
+
+    pub(super) fn policy_allows(&self, name: &str) -> bool {
+        self.runtime.policy.allows_builtin(name)
     }
 }

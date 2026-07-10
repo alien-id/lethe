@@ -23,4 +23,5 @@ impl super::ToolRegistry<'_> {
     }
 }
 
-pub(crate) const NO_EGRESS_ERROR: &str = "No chat transport attached. This tool only works during active user transport processing.";
+pub(crate) const NO_EGRESS_ERROR: &str =
+    "No chat transport attached. This tool only works during active user transport processing.";

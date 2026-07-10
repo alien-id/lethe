@@ -34,6 +34,9 @@ impl<'a> ToolRegistry<'a> {
         let Some(def) = find_def(name) else {
             return format!("Unknown tool: {name}");
         };
+        if !self.policy_allows(def.name) {
+            return format!("Error: tool '{name}' is disabled by the active capability policy.");
+        }
         match def.execute {
             ToolExecutor::Sync(f) => f(self, args),
             ToolExecutor::Async(f) => f(self, args).await,
@@ -63,6 +66,9 @@ impl<'a> ToolRegistry<'a> {
         let Some(def) = find_def(name) else {
             return format!("Unknown tool: {name}");
         };
+        if !self.policy_allows(def.name) {
+            return format!("Error: tool '{name}' is disabled by the active capability policy.");
+        }
         match def.execute {
             ToolExecutor::Sync(f) => f(self, args),
             ToolExecutor::Async(_) => {

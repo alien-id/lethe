@@ -3,10 +3,13 @@ use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use serde_json::json;
+use sha2::{Digest, Sha256};
 
 const AGENT_BROWSER: &str = "agent-browser";
 const DEFAULT_TIMEOUT_SECONDS: u64 = 60;
@@ -14,6 +17,9 @@ const DEFAULT_TIMEOUT_SECONDS: u64 = 60;
 #[derive(Clone, Debug)]
 pub struct BrowserTools {
     profile_dir: PathBuf,
+    session_name: String,
+    close_on_drop: bool,
+    used: Arc<AtomicBool>,
 }
 
 #[derive(Debug)]
@@ -25,8 +31,21 @@ struct BrowserCommandOutput {
 
 impl BrowserTools {
     pub fn new(cache_dir: impl Into<PathBuf>) -> Self {
+        Self::with_lifecycle(cache_dir, false)
+    }
+
+    pub fn hosted(cache_dir: impl Into<PathBuf>) -> Self {
+        Self::with_lifecycle(cache_dir, true)
+    }
+
+    fn with_lifecycle(cache_dir: impl Into<PathBuf>, close_on_drop: bool) -> Self {
+        let profile_dir = cache_dir.into().join("browser");
+        let digest = Sha256::digest(profile_dir.to_string_lossy().as_bytes());
         Self {
-            profile_dir: cache_dir.into().join("browser"),
+            profile_dir,
+            session_name: format!("lethe-{digest:x}"),
+            close_on_drop,
+            used: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -112,6 +131,9 @@ impl BrowserTools {
         let program = find_executable(AGENT_BROWSER).ok_or_else(|| {
             "agent-browser not found. Install with: npm install -g agent-browser".to_string()
         })?;
+        if args.first().is_none_or(|arg| arg != "close") {
+            self.used.store(true, Ordering::Relaxed);
+        }
         run_command(
             &program,
             &self.agent_browser_args(args),
@@ -121,12 +143,36 @@ impl BrowserTools {
 
     fn agent_browser_args(&self, args: &[String]) -> Vec<String> {
         let mut command_args = Vec::new();
-        if !args.iter().any(|arg| arg == "--profile") && !args.iter().any(|arg| arg == "install") {
+        let installing = args.iter().any(|arg| arg == "install");
+        if !installing && !args.iter().any(|arg| arg == "--session") {
+            command_args.push("--session".to_string());
+            command_args.push(self.session_name.clone());
+        }
+        if !installing && !args.iter().any(|arg| arg == "--profile") {
             command_args.push("--profile".to_string());
             command_args.push(self.profile_dir.display().to_string());
         }
         command_args.extend(args.iter().cloned());
         command_args
+    }
+}
+
+impl Drop for BrowserTools {
+    fn drop(&mut self) {
+        if !self.close_on_drop
+            || Arc::strong_count(&self.used) != 1
+            || !self.used.swap(false, Ordering::Relaxed)
+        {
+            return;
+        }
+        let Some(program) = find_executable(AGENT_BROWSER) else {
+            return;
+        };
+        let _ = run_command(
+            &program,
+            &self.agent_browser_args(&["close".to_string()]),
+            Duration::from_secs(5),
+        );
     }
 }
 
@@ -312,9 +358,11 @@ mod tests {
         let args =
             tools.agent_browser_args(&["open".to_string(), "https://example.com".to_string()]);
 
+        assert_eq!(args[0], "--session");
+        assert!(args[1].starts_with("lethe-"));
         assert_eq!(
-            args,
-            vec![
+            &args[2..],
+            [
                 "--profile",
                 "/tmp/lethe-cache/browser",
                 "open",
@@ -333,12 +381,23 @@ mod tests {
             "https://example.com".to_string(),
         ]);
         assert_eq!(
-            explicit,
-            vec!["--profile", "/tmp/custom", "open", "https://example.com"]
+            &explicit[2..],
+            ["--profile", "/tmp/custom", "open", "https://example.com"]
         );
+        assert_eq!(explicit[0], "--session");
 
         let install = tools.agent_browser_args(&["install".to_string()]);
         assert_eq!(install, vec!["install"]);
+    }
+
+    #[test]
+    fn cache_paths_get_distinct_browser_sessions() {
+        let first = BrowserTools::hosted("/tmp/lethe/tenant-a/cache");
+        let second = BrowserTools::hosted("/tmp/lethe/tenant-b/cache");
+
+        assert_ne!(first.session_name, second.session_name);
+        assert!(first.close_on_drop);
+        assert!(second.close_on_drop);
     }
 
     #[test]

@@ -243,6 +243,39 @@ fn executes_files_memory_notes_and_shell_tools() {
 }
 
 #[test]
+fn hosted_safe_policy_exposes_memory_but_blocks_local_execution() {
+    let (_tmp, memory, shell) = registry();
+    let registry = ToolRegistry::with_runtime(
+        &memory,
+        memory.workspace_dir(),
+        "/tmp/lethe-cache",
+        &shell,
+        ToolRuntime {
+            policy: ToolPolicy::HostedSafe,
+            ..ToolRuntime::default()
+        },
+    );
+
+    let names = registry
+        .tools()
+        .into_iter()
+        .map(|tool| tool.name)
+        .collect::<std::collections::HashSet<_>>();
+    assert!(names.contains("memory_read"));
+    assert!(names.contains("memory_update"));
+    assert!(names.contains("browser_open"));
+    assert!(!names.contains("bash"));
+    assert!(!names.contains("read_file"));
+    assert!(!registry.tool_is_available("bash"));
+    assert!(registry.tool_is_available("browser_open"));
+    assert!(
+        registry
+            .execute("bash", &json!({"command": "echo forbidden"}))
+            .contains("disabled by the active capability policy")
+    );
+}
+
+#[test]
 fn executes_todo_update_and_reminder_tools() {
     let (_tmp, memory, shell) = registry();
     let registry = ToolRegistry::new(&memory, memory.workspace_dir(), "/tmp/lethe-cache", &shell);

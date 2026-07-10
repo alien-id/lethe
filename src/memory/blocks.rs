@@ -23,6 +23,8 @@ pub enum MemoryError {
     Io(#[from] std::io::Error),
     #[error(transparent)]
     Json(#[from] serde_json::Error),
+    #[error("storage backend error: {0}")]
+    Backend(String),
 }
 
 pub type MemoryResult<T> = Result<T, MemoryError>;
@@ -354,7 +356,7 @@ fn default_limit() -> usize {
     DEFAULT_BLOCK_LIMIT
 }
 
-fn validate_label(label: &str) -> MemoryResult<()> {
+pub(crate) fn validate_label(label: &str) -> MemoryResult<()> {
     let valid = !label.is_empty()
         && label
             .chars()
@@ -366,7 +368,7 @@ fn validate_label(label: &str) -> MemoryResult<()> {
     }
 }
 
-fn enforce_limit(value: &str, limit: usize) -> MemoryResult<()> {
+pub(crate) fn enforce_limit(value: &str, limit: usize) -> MemoryResult<()> {
     if value.len() <= limit {
         Ok(())
     } else {
@@ -398,6 +400,35 @@ fn embedded_meta(name: &str) -> Option<&'static str> {
         )),
         _ => None,
     }
+}
+
+pub(crate) fn embedded_defaults() -> MemoryResult<Vec<MemoryBlock>> {
+    ["identity", "human", "project", CONVERSATION_SUMMARY_LABEL]
+        .into_iter()
+        .map(|label| {
+            let mut metadata = embedded_meta(label)
+                .map(serde_json::from_str::<BlockMetadata>)
+                .transpose()?
+                .unwrap_or_default();
+            if metadata.label.is_empty() {
+                metadata.label = label.to_string();
+            }
+            if metadata.limit == 0 {
+                metadata.limit = DEFAULT_BLOCK_LIMIT;
+            }
+            Ok(MemoryBlock {
+                label: label.to_string(),
+                value: embedded_block(label).unwrap_or("").trim().to_string(),
+                description: metadata.description,
+                limit: metadata.limit,
+                read_only: metadata.read_only,
+                hidden: metadata.hidden,
+                stable: metadata.stable,
+                created_at: metadata.created_at,
+                updated_at: metadata.updated_at,
+            })
+        })
+        .collect()
 }
 
 #[allow(dead_code)]

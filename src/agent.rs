@@ -202,6 +202,17 @@ async fn await_pending_task(
 impl Agent {
     pub fn from_settings(settings: Settings) -> AgentResult<Self> {
         let memory = Arc::new(MemoryStore::from_settings(&settings)?);
+        Self::from_settings_with_memory(settings, memory)
+    }
+
+    /// Build the real Lethe agent around an injected memory backend. This is
+    /// the hosted/multiplexing seam: prompt assembly, Hippocampus recall, tool
+    /// semantics, history compaction, and curation remain exactly the same as
+    /// the standalone binary.
+    pub fn from_settings_with_memory(
+        settings: Settings,
+        memory: Arc<MemoryStore>,
+    ) -> AgentResult<Self> {
         let prompts = PromptStore::new(&settings.paths.workspace_dir, &settings.paths.config_dir);
         let router = Arc::new(RwLock::new(LlmRouter::new(LlmRouterConfig::from_settings(
             &settings,

@@ -27,6 +27,8 @@ pub enum ArchivalError {
     Sqlite(#[from] rusqlite::Error),
     #[error(transparent)]
     Embedding(#[from] anyhow::Error),
+    #[error("storage backend error: {0}")]
+    Backend(String),
 }
 
 pub type ArchivalResult<T> = Result<T, ArchivalError>;
@@ -307,7 +309,7 @@ impl ArchivalMemory {
     }
 }
 
-fn compare_entries(left: &ArchivalEntry, right: &ArchivalEntry) -> Ordering {
+pub(crate) fn compare_entries(left: &ArchivalEntry, right: &ArchivalEntry) -> Ordering {
     right
         .score
         .partial_cmp(&left.score)
@@ -322,7 +324,7 @@ fn parse_time(value: &str) -> Option<DateTime<Utc>> {
         .map(|time| time.with_timezone(&Utc))
 }
 
-fn score_entry(query: &str, terms: &[String], entry: &ArchivalEntry) -> f64 {
+pub(crate) fn score_entry(query: &str, terms: &[String], entry: &ArchivalEntry) -> f64 {
     if terms.is_empty() {
         return 1.0;
     }

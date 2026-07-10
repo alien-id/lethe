@@ -155,6 +155,8 @@ pub enum TodoError {
     Io(#[from] std::io::Error),
     #[error(transparent)]
     Json(#[from] serde_json::Error),
+    #[error("storage backend error: {0}")]
+    Backend(String),
 }
 
 pub type TodoResult<T> = Result<T, TodoError>;

@@ -1,5 +1,6 @@
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use chrono::{DateTime, Local, Utc};
 use serde::{Deserialize, Serialize};
@@ -9,6 +10,7 @@ use crate::config::Settings;
 use crate::todos::{TodoError, TodoManager};
 
 use super::archival::{ArchivalEntry, ArchivalError, ArchivalMemory};
+use super::backend::{ArchivalStorage, BlockStorage, MessageStorage, NoteStorage, TodoStorage};
 use super::blocks::{BlockManager, MemoryBlock, MemoryError};
 use super::db::MemoryDb;
 use super::messages::{MessageHistory, MessageHistoryError, MessageRole, StoredMessage};
@@ -30,6 +32,8 @@ pub enum MemoryStoreError {
     Io(#[from] std::io::Error),
     #[error(transparent)]
     Sqlite(#[from] rusqlite::Error),
+    #[error("storage backend error: {0}")]
+    Backend(String),
 }
 
 pub type MemoryStoreResult<T> = Result<T, MemoryStoreError>;
@@ -45,11 +49,11 @@ pub struct MemoryStats {
 
 #[derive(Debug)]
 pub struct MemoryStore {
-    pub blocks: BlockManager,
-    pub archival: ArchivalMemory,
-    pub messages: MessageHistory,
-    pub notes: NoteStore,
-    pub todos: TodoManager,
+    pub blocks: Arc<dyn BlockStorage>,
+    pub archival: Arc<dyn ArchivalStorage>,
+    pub messages: Arc<dyn MessageStorage>,
+    pub notes: Arc<dyn NoteStorage>,
+    pub todos: Arc<dyn TodoStorage>,
     memory_data_path: PathBuf,
     workspace_dir: PathBuf,
 }
@@ -104,14 +108,38 @@ impl MemoryStore {
         }
 
         Ok(Self {
+            blocks: Arc::new(blocks),
+            archival: Arc::new(archival),
+            messages: Arc::new(messages),
+            notes: Arc::new(notes),
+            todos: Arc::new(todos),
+            memory_data_path,
+            workspace_dir,
+        })
+    }
+
+    /// Construct the canonical Lethe memory facade around alternate storage
+    /// implementations. Hosted multiplexers use one tenant-scoped backend set
+    /// per logical user; all agent, recall, tool, and curator behavior remains
+    /// in this crate.
+    pub fn from_backends(
+        workspace_dir: impl Into<PathBuf>,
+        memory_data_path: impl Into<PathBuf>,
+        blocks: Arc<dyn BlockStorage>,
+        archival: Arc<dyn ArchivalStorage>,
+        messages: Arc<dyn MessageStorage>,
+        notes: Arc<dyn NoteStorage>,
+        todos: Arc<dyn TodoStorage>,
+    ) -> Self {
+        Self {
             blocks,
             archival,
             messages,
             notes,
             todos,
-            memory_data_path,
-            workspace_dir,
-        })
+            memory_data_path: memory_data_path.into(),
+            workspace_dir: workspace_dir.into(),
+        }
     }
 
     pub fn memory_data_path(&self) -> &Path {

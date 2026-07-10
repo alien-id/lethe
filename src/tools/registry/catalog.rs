@@ -31,6 +31,7 @@ pub fn find_def(name: &str) -> Option<&'static ToolDef> {
 impl<'a> ToolRegistry<'a> {
     pub fn tools(&self) -> Vec<Tool> {
         let mut tools = all_defs()
+            .filter(|def| self.runtime.policy.allows_builtin(def.name))
             .filter(|def| self.def_is_visible(def))
             .filter(|def| {
                 !self
@@ -55,6 +56,9 @@ impl<'a> ToolRegistry<'a> {
     /// compatible with the currently attached runtime contexts. CortexOnly is
     /// requestable from anywhere — it just isn't loaded initially in subagents.
     pub(super) fn def_is_visible(&self, def: &ToolDef) -> bool {
+        if !self.runtime.policy.allows_builtin(def.name) {
+            return false;
+        }
         match def.category {
             ToolCategory::Initial | ToolCategory::Requestable | ToolCategory::CortexOnly => true,
             // The built-in browser hides when the vault-sealed browser is active,
