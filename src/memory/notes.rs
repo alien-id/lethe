@@ -454,7 +454,10 @@ fn build_note_row(path: &Path, db: &MemoryDb) -> NoteResult<NewMemoryRow> {
     })
 }
 
-pub(crate) fn compare_search_results(left: &NoteSearchResult, right: &NoteSearchResult) -> Ordering {
+pub(crate) fn compare_search_results(
+    left: &NoteSearchResult,
+    right: &NoteSearchResult,
+) -> Ordering {
     right
         .score
         .partial_cmp(&left.score)

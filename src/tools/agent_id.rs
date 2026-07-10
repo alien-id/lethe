@@ -33,6 +33,33 @@ fn hub_of<'a>(registry: &'a ToolRegistry<'a>) -> Option<&'a SecurePromptHub> {
     registry.runtime.secure_prompt.as_ref()
 }
 
+fn state_dir_of(registry: &ToolRegistry<'_>) -> PathBuf {
+    registry
+        .runtime
+        .agent_id_state_dir
+        .clone()
+        .unwrap_or_else(crate::agent_id::cached_state_dir)
+}
+
+fn hosted_safe(registry: &ToolRegistry<'_>) -> bool {
+    registry.runtime.policy == crate::tools::registry::ToolPolicy::HostedSafe
+}
+
+fn interactive_hub<'a>(
+    registry: &'a ToolRegistry<'a>,
+) -> Result<Option<&'a SecurePromptHub>, String> {
+    let hub = hub_of(registry);
+    if hosted_safe(registry) && hub.is_none() {
+        return Err(err("Secure credential input is temporarily unavailable."));
+    }
+    Ok(hub)
+}
+
+fn is_http_url(value: &str) -> bool {
+    let value = value.trim().to_ascii_lowercase();
+    value.starts_with("https://") || value.starts_with("http://")
+}
+
 /// A secure-form credential write BLOCKS until the owner types and submits the
 /// values, so an `ok` result means the fill already happened. Fold that fact into
 /// the result as a `note`: without it the model reads `{ok:true}` as "I made an
@@ -73,7 +100,12 @@ async fn fast(bin: Bin, sd: &Path, argv: &[String]) -> String {
 }
 
 /// Run a subcommand that can block on a human (secure form / headed window).
-async fn interactive(bin: Bin, sd: &Path, argv: &[String], hub: Option<&SecurePromptHub>) -> String {
+async fn interactive(
+    bin: Bin,
+    sd: &Path,
+    argv: &[String],
+    hub: Option<&SecurePromptHub>,
+) -> String {
     let refs: Vec<&str> = argv.iter().map(String::as_str).collect();
     match cli::run_interactive(bin, sd, &refs, hub).await {
         Ok(result) => result.json.to_string(),
@@ -83,16 +115,16 @@ async fn interactive(bin: Bin, sd: &Path, argv: &[String], hub: Option<&SecurePr
 
 // ── Identity ───────────────────────────────────────────────────────────────
 
-fn exec_agent_id_status<'a>(_r: &'a ToolRegistry<'a>, _args: &'a Value) -> BoxFuture<'a> {
+fn exec_agent_id_status<'a>(r: &'a ToolRegistry<'a>, _args: &'a Value) -> BoxFuture<'a> {
     Box::pin(async move {
-        let sd = crate::agent_id::cached_state_dir();
+        let sd = state_dir_of(r);
         fast(Bin::Core, &sd, &["status".to_string()]).await
     })
 }
 
-fn exec_agent_id_sign<'a>(_r: &'a ToolRegistry<'a>, args: &'a Value) -> BoxFuture<'a> {
+fn exec_agent_id_sign<'a>(r: &'a ToolRegistry<'a>, args: &'a Value) -> BoxFuture<'a> {
     Box::pin(async move {
-        let sd = crate::agent_id::cached_state_dir();
+        let sd = state_dir_of(r);
         let (Some(op_type), Some(action), Some(payload)) = (
             nonempty_string(args, "type"),
             nonempty_string(args, "action"),
@@ -119,7 +151,7 @@ fn exec_agent_id_sign<'a>(_r: &'a ToolRegistry<'a>, args: &'a Value) -> BoxFutur
 
 fn exec_agent_id_bind<'a>(r: &'a ToolRegistry<'a>, args: &'a Value) -> BoxFuture<'a> {
     Box::pin(async move {
-        let sd = crate::agent_id::cached_state_dir();
+        let sd = state_dir_of(r);
         let hub = hub_of(r).cloned();
 
         // Resume a live pending binding rather than voiding the user's in-flight
@@ -135,8 +167,11 @@ fn exec_agent_id_bind<'a>(r: &'a ToolRegistry<'a>, args: &'a Value) -> BoxFuture
             .to_string();
         }
 
-        let provider = nonempty_string(args, "provider_address")
-            .or_else(|| std::env::var("ALIEN_PROVIDER_ADDRESS").ok().filter(|v| !v.trim().is_empty()));
+        let provider = nonempty_string(args, "provider_address").or_else(|| {
+            std::env::var("ALIEN_PROVIDER_ADDRESS")
+                .ok()
+                .filter(|v| !v.trim().is_empty())
+        });
         let Some(provider) = provider else {
             return err(
                 "No provider address. Pass `provider_address` or set ALIEN_PROVIDER_ADDRESS.",
@@ -148,7 +183,11 @@ fn exec_agent_id_bind<'a>(r: &'a ToolRegistry<'a>, args: &'a Value) -> BoxFuture
         let auth = fast_json(
             Bin::Core,
             &sd,
-            &["auth".to_string(), "--provider-address".to_string(), provider],
+            &[
+                "auth".to_string(),
+                "--provider-address".to_string(),
+                provider,
+            ],
         )
         .await;
         if auth.get("ok").and_then(Value::as_bool) != Some(true) {
@@ -175,13 +214,8 @@ async fn fast_json(bin: Bin, sd: &Path, argv: &[String]) -> Value {
 /// ceremony. Emits `agent_id.bound` on success when a hub is present.
 fn spawn_bind_poll(sd: PathBuf, hub: Option<SecurePromptHub>) {
     tokio::spawn(async move {
-        let result = cli::run_interactive(
-            Bin::Core,
-            &sd,
-            &["bind", "--timeout-sec", "840"],
-            None,
-        )
-        .await;
+        let result =
+            cli::run_interactive(Bin::Core, &sd, &["bind", "--timeout-sec", "840"], None).await;
         match result {
             Ok(r) if r.json.get("ok").and_then(Value::as_bool) == Some(true) => {
                 tracing::info!("agent-id: owner binding completed");
@@ -215,16 +249,16 @@ fn read_live_pending_auth(sd: &Path) -> Option<Value> {
 
 // ── Vault ───────────────────────────────────────────────────────────────────
 
-fn exec_vault_list<'a>(_r: &'a ToolRegistry<'a>, _args: &'a Value) -> BoxFuture<'a> {
+fn exec_vault_list<'a>(r: &'a ToolRegistry<'a>, _args: &'a Value) -> BoxFuture<'a> {
     Box::pin(async move {
-        let sd = crate::agent_id::cached_state_dir();
+        let sd = state_dir_of(r);
         fast(Bin::Vault, &sd, &["list".to_string()]).await
     })
 }
 
 fn exec_vault_add<'a>(r: &'a ToolRegistry<'a>, args: &'a Value) -> BoxFuture<'a> {
     Box::pin(async move {
-        let sd = crate::agent_id::cached_state_dir();
+        let sd = state_dir_of(r);
         let Some(name) = nonempty_string(args, "name") else {
             return err("`name` is required.");
         };
@@ -257,27 +291,39 @@ fn exec_vault_add<'a>(r: &'a ToolRegistry<'a>, args: &'a Value) -> BoxFuture<'a>
         // Non-secret: the sign-in page a `login` credential drives. Required for
         // alien_browser_auto_login to work — without it there is nowhere to start.
         if let Some(login_url) = nonempty_string(args, "login_url") {
+            if hosted_safe(r) && !is_http_url(&login_url) {
+                return err("Hosted login URLs must use http:// or https://.");
+            }
             argv.push("--login-url".to_string());
             argv.push(login_url);
         }
-        let hosted = hub_of(r).is_some();
-        note_secret_collected(interactive(Bin::Vault, &sd, &argv, hub_of(r)).await, hosted)
+        let hub = match interactive_hub(r) {
+            Ok(hub) => hub,
+            Err(error) => return error,
+        };
+        let hosted = hub.is_some();
+        note_secret_collected(interactive(Bin::Vault, &sd, &argv, hub).await, hosted)
     })
 }
 
-fn exec_vault_remove<'a>(_r: &'a ToolRegistry<'a>, args: &'a Value) -> BoxFuture<'a> {
+fn exec_vault_remove<'a>(r: &'a ToolRegistry<'a>, args: &'a Value) -> BoxFuture<'a> {
     Box::pin(async move {
-        let sd = crate::agent_id::cached_state_dir();
+        let sd = state_dir_of(r);
         let Some(name) = nonempty_string(args, "name") else {
             return err("`name` is required.");
         };
-        fast(Bin::Vault, &sd, &["remove".to_string(), "--name".to_string(), name]).await
+        fast(
+            Bin::Vault,
+            &sd,
+            &["remove".to_string(), "--name".to_string(), name],
+        )
+        .await
     })
 }
 
 fn exec_vault_set_totp<'a>(r: &'a ToolRegistry<'a>, args: &'a Value) -> BoxFuture<'a> {
     Box::pin(async move {
-        let sd = crate::agent_id::cached_state_dir();
+        let sd = state_dir_of(r);
         let Some(name) = nonempty_string(args, "name") else {
             return err("`name` is required.");
         };
@@ -287,19 +333,25 @@ fn exec_vault_set_totp<'a>(r: &'a ToolRegistry<'a>, args: &'a Value) -> BoxFutur
             name,
             "--form".to_string(),
         ];
-        let hosted = hub_of(r).is_some();
-        note_secret_collected(interactive(Bin::Vault, &sd, &argv, hub_of(r)).await, hosted)
+        let hub = match interactive_hub(r) {
+            Ok(hub) => hub,
+            Err(error) => return error,
+        };
+        let hosted = hub.is_some();
+        note_secret_collected(interactive(Bin::Vault, &sd, &argv, hub).await, hosted)
     })
 }
 
 // ── Browser (local) ──────────────────────────────────────────────────────────
 
-fn exec_browser_login<'a>(_r: &'a ToolRegistry<'a>, args: &'a Value) -> BoxFuture<'a> {
+fn exec_browser_login<'a>(r: &'a ToolRegistry<'a>, args: &'a Value) -> BoxFuture<'a> {
     Box::pin(async move {
         if !crate::agent_id::browser_headed_available() {
-            return err("A headed browser login needs a GUI session (none detected). Use auto_login with stored credentials instead.");
+            return err(
+                "A headed browser login needs a GUI session (none detected). Use auto_login with stored credentials instead.",
+            );
         }
-        let sd = crate::agent_id::cached_state_dir();
+        let sd = state_dir_of(r);
         let mut argv = vec!["login".to_string()];
         push_opt(&mut argv, "--name", nonempty_string(args, "name"));
         push_opt(&mut argv, "--url", nonempty_string(args, "url"));
@@ -319,20 +371,24 @@ fn exec_browser_login<'a>(_r: &'a ToolRegistry<'a>, args: &'a Value) -> BoxFutur
 
 fn exec_browser_auto_login<'a>(r: &'a ToolRegistry<'a>, args: &'a Value) -> BoxFuture<'a> {
     Box::pin(async move {
-        let sd = crate::agent_id::cached_state_dir();
+        let sd = state_dir_of(r);
         let Some(cred) = nonempty_string(args, "cred") else {
             return err("`cred` (a `login` credential name) is required.");
         };
         let mut argv = vec!["auto-login".to_string(), "--cred".to_string(), cred];
         push_opt(&mut argv, "--name", nonempty_string(args, "name"));
         // May prompt for an interactive OTP when there's no stored TOTP seed.
-        interactive(Bin::Browser, &sd, &argv, hub_of(r)).await
+        let hub = match interactive_hub(r) {
+            Ok(hub) => hub,
+            Err(error) => return error,
+        };
+        interactive(Bin::Browser, &sd, &argv, hub).await
     })
 }
 
-fn exec_browser_open<'a>(_r: &'a ToolRegistry<'a>, args: &'a Value) -> BoxFuture<'a> {
+fn exec_browser_open<'a>(r: &'a ToolRegistry<'a>, args: &'a Value) -> BoxFuture<'a> {
     Box::pin(async move {
-        let sd = crate::agent_id::cached_state_dir();
+        let sd = state_dir_of(r);
         let name = nonempty_string(args, "name").unwrap_or_else(|| "main".to_string());
         let mut argv = vec!["open".to_string(), "--name".to_string(), name.clone()];
         if bool_arg(args, "headed", false) {
@@ -342,44 +398,79 @@ fn exec_browser_open<'a>(_r: &'a ToolRegistry<'a>, args: &'a Value) -> BoxFuture
             argv.push("--headed".to_string());
         }
         let log = std::env::temp_dir().join(format!("agent-browser-{name}.log"));
-        match cli::spawn_daemon_ready(&sd, &argv.iter().map(String::as_str).collect::<Vec<_>>(), log).await {
+        match cli::spawn_daemon_ready(
+            &sd,
+            &argv.iter().map(String::as_str).collect::<Vec<_>>(),
+            log,
+        )
+        .await
+        {
             Ok(ready) => ready.to_string(),
             Err(message) => err(message),
         }
     })
 }
 
-fn exec_browser_close<'a>(_r: &'a ToolRegistry<'a>, args: &'a Value) -> BoxFuture<'a> {
+fn exec_browser_close<'a>(r: &'a ToolRegistry<'a>, args: &'a Value) -> BoxFuture<'a> {
     Box::pin(async move {
-        let sd = crate::agent_id::cached_state_dir();
+        let sd = state_dir_of(r);
         let name = nonempty_string(args, "name").unwrap_or_else(|| "main".to_string());
-        fast(Bin::Browser, &sd, &["close".to_string(), "--name".to_string(), name]).await
+        fast(
+            Bin::Browser,
+            &sd,
+            &["close".to_string(), "--name".to_string(), name],
+        )
+        .await
     })
 }
 
-fn exec_browser_act<'a>(_r: &'a ToolRegistry<'a>, args: &'a Value) -> BoxFuture<'a> {
+fn exec_browser_act<'a>(r: &'a ToolRegistry<'a>, args: &'a Value) -> BoxFuture<'a> {
     Box::pin(async move {
-        let sd = crate::agent_id::cached_state_dir();
+        let sd = state_dir_of(r);
         let Some(action) = nonempty_string(args, "action") else {
-            return err("`action` is required (e.g. snapshot, click, type, navigate, page-text, wait, tabs, screenshot).");
+            return err(
+                "`action` is required (e.g. snapshot, click, type, navigate, page-text, wait, tabs, screenshot).",
+            );
         };
         // Guard the secret-injection verbs to their dedicated tools so the
         // airgap contract is explicit and not reachable via a generic passthrough.
         if action == "fill-secret" || action == "fill-otp" {
-            return err("Use alien_browser_fill_secret / alien_browser_fill_otp for credential injection.");
+            return err(
+                "Use alien_browser_fill_secret / alien_browser_fill_otp for credential injection.",
+            );
+        }
+        let mut params = args
+            .get("params")
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default();
+        if hosted_safe(r) {
+            if action == "upload" {
+                return err("File upload is disabled by the hosted capability policy.");
+            }
+            if matches!(action.as_str(), "navigate" | "tab-new")
+                && let Some(url) = params.get("url").and_then(Value::as_str)
+                && !is_http_url(url)
+            {
+                return err("Hosted browser navigation must use http:// or https://.");
+            }
+            // The plugin's defaults stay inside this tenant's state directory;
+            // an arbitrary path would otherwise become an indirect file-write
+            // capability even though filesystem tools are disabled.
+            if matches!(action.as_str(), "screenshot" | "zoom") {
+                params.remove("path");
+            }
         }
         let mut argv = vec![action];
-        if let Some(Value::Object(params)) = args.get("params") {
-            append_flags(&mut argv, params);
-        }
+        append_flags(&mut argv, &params);
         push_opt(&mut argv, "--name", nonempty_string(args, "name"));
         fast(Bin::Browser, &sd, &argv).await
     })
 }
 
-fn exec_browser_fill_secret<'a>(_r: &'a ToolRegistry<'a>, args: &'a Value) -> BoxFuture<'a> {
+fn exec_browser_fill_secret<'a>(r: &'a ToolRegistry<'a>, args: &'a Value) -> BoxFuture<'a> {
     Box::pin(async move {
-        let sd = crate::agent_id::cached_state_dir();
+        let sd = state_dir_of(r);
         let (Some(reference), Some(cred)) =
             (nonempty_string(args, "ref"), nonempty_string(args, "cred"))
         else {
@@ -402,7 +493,7 @@ fn exec_browser_fill_secret<'a>(_r: &'a ToolRegistry<'a>, args: &'a Value) -> Bo
 
 fn exec_browser_fill_otp<'a>(r: &'a ToolRegistry<'a>, args: &'a Value) -> BoxFuture<'a> {
     Box::pin(async move {
-        let sd = crate::agent_id::cached_state_dir();
+        let sd = state_dir_of(r);
         let (Some(reference), Some(cred)) =
             (nonempty_string(args, "ref"), nonempty_string(args, "cred"))
         else {
@@ -416,7 +507,11 @@ fn exec_browser_fill_otp<'a>(r: &'a ToolRegistry<'a>, args: &'a Value) -> BoxFut
             cred,
         ];
         // May prompt for an interactive code if the cred has no TOTP seed.
-        interactive(Bin::Browser, &sd, &argv, hub_of(r)).await
+        let hub = match interactive_hub(r) {
+            Ok(hub) => hub,
+            Err(error) => return error,
+        };
+        interactive(Bin::Browser, &sd, &argv, hub).await
     })
 }
 
@@ -446,9 +541,15 @@ fn append_flags(argv: &mut Vec<String>, params: &serde_json::Map<String, Value>)
             Value::Array(items) => {
                 let joined = items
                     .iter()
-                    .filter_map(|v| v.as_str().map(str::to_string).or_else(|| {
-                        if v.is_number() { Some(v.to_string()) } else { None }
-                    }))
+                    .filter_map(|v| {
+                        v.as_str().map(str::to_string).or_else(|| {
+                            if v.is_number() {
+                                Some(v.to_string())
+                            } else {
+                                None
+                            }
+                        })
+                    })
                     .collect::<Vec<_>>()
                     .join(",");
                 argv.push(flag);
@@ -470,9 +571,10 @@ pub const TOOL_DEFS: &[ToolDef] = &[
     ToolDef {
         name: "agent_id_bind",
         description: "Begin binding this agent to its human owner via the Alien app. Returns a deep link + QR for the owner to approve; binding completes in the background (identity keeps working as L0 until then). Safe to call again — it resumes a pending request rather than restarting it.",
-        params: &[
-            p_str("provider_address", "Alien SSO provider address. Defaults to ALIEN_PROVIDER_ADDRESS."),
-        ],
+        params: &[p_str(
+            "provider_address",
+            "Alien SSO provider address. Defaults to ALIEN_PROVIDER_ADDRESS.",
+        )],
         category: ToolCategory::AgentId,
         execute: ToolExecutor::Async(exec_agent_id_bind),
     },
@@ -480,7 +582,10 @@ pub const TOOL_DEFS: &[ToolDef] = &[
         name: "agent_id_sign",
         description: "Append a signed, tamper-evident operation to this agent's audit trail (Ed25519 over a canonical envelope). Use to attest a meaningful action.",
         params: &[
-            p_str_req("type", "Operation type (short label, e.g. 'commit', 'payment', 'email')."),
+            p_str_req(
+                "type",
+                "Operation type (short label, e.g. 'commit', 'payment', 'email').",
+            ),
             p_str_req("action", "Action verb (e.g. 'create', 'send', 'approve')."),
             p_str_req("payload", "JSON string describing what was done."),
             p_str("meta", "Optional JSON string of extra metadata."),
@@ -499,12 +604,31 @@ pub const TOOL_DEFS: &[ToolDef] = &[
         name: "vault_add",
         description: "Store a credential in the Alien vault. You supply only name/type/domains/access; the owner types the secret values into a secure form that appears AUTOMATICALLY — in the hosted chat it is a credential card shown right in this conversation's UI; locally it is a browser form on the owner's machine. No phone or external app is involved; never direct the owner elsewhere. This call BLOCKS until the owner submits that form and returns only AFTER they have — so an ok result means the values are already entered and the credential is fully stored. Do not ask the owner to fill anything in or to report back; just continue. The values never reach you or this conversation. Types: bearer, basic, header, query, cookie, oauth2, login, totp.",
         params: &[
-            p_str_req("name", "Credential name (letters, digits, dot/dash/underscore)."),
-            p_enum("type", "Credential type.", &["bearer", "basic", "header", "query", "cookie", "oauth2", "login", "totp"]),
-            p_str_array("domains", "Host allowlist this credential may be used on (e.g. api.github.com)."),
-            p_enum("access", "Access level: 'ro' read-only or 'rw' unrestricted (default rw).", &["ro", "rw"]),
+            p_str_req(
+                "name",
+                "Credential name (letters, digits, dot/dash/underscore).",
+            ),
+            p_enum(
+                "type",
+                "Credential type.",
+                &[
+                    "bearer", "basic", "header", "query", "cookie", "oauth2", "login", "totp",
+                ],
+            ),
+            p_str_array(
+                "domains",
+                "Host allowlist this credential may be used on (e.g. api.github.com).",
+            ),
+            p_enum(
+                "access",
+                "Access level: 'ro' read-only or 'rw' unrestricted (default rw).",
+                &["ro", "rw"],
+            ),
             p_str("description", "Optional human-readable description."),
-            p_str("login_url", "For type=login only: the sign-in page URL (e.g. https://www.reddit.com/login). REQUIRED for alien_browser_auto_login to work — set it whenever you add a login credential you'll log in with."),
+            p_str(
+                "login_url",
+                "For type=login only: the sign-in page URL (e.g. https://www.reddit.com/login). REQUIRED for alien_browser_auto_login to work — set it whenever you add a login credential you'll log in with.",
+            ),
         ],
         category: ToolCategory::AgentId,
         execute: ToolExecutor::Async(exec_vault_add),
@@ -519,7 +643,10 @@ pub const TOOL_DEFS: &[ToolDef] = &[
     ToolDef {
         name: "vault_set_totp",
         description: "Attach a 2FA/TOTP seed to a login or totp credential so logins can generate codes automatically. The owner types the seed into a secure form that appears automatically (hosted: a card in this chat; locally: a browser form) — no phone or external app is involved; it never reaches you. Only useful where a browser session can consume it.",
-        params: &[p_str_req("name", "Credential name to attach the TOTP seed to.")],
+        params: &[p_str_req(
+            "name",
+            "Credential name to attach the TOTP seed to.",
+        )],
         category: ToolCategory::AgentIdBrowser,
         execute: ToolExecutor::Async(exec_vault_set_totp),
     },
@@ -530,7 +657,11 @@ pub const TOOL_DEFS: &[ToolDef] = &[
             p_str("name", "Session name (default 'main')."),
             p_str("url", "URL to open for sign-in."),
             p_str("account", "Optional account label."),
-            p_enum("access", "Seal the session read-only or read-write.", &["ro", "rw"]),
+            p_enum(
+                "access",
+                "Seal the session read-only or read-write.",
+                &["ro", "rw"],
+            ),
             p_bool("fresh", "Start from a fresh profile instead of resuming."),
         ],
         category: ToolCategory::AgentIdBrowser,
@@ -541,7 +672,10 @@ pub const TOOL_DEFS: &[ToolDef] = &[
         description: "Headlessly log in using a stored `login` credential (username + password + 2FA policy) and SEAL the resulting signed-in session into a browser-profile for reuse. This is the FIRST step of the headless browser flow (there is no profile to open until this runs) — call it before alien_browser_open/act. Requires the login credential to have a login_url (set it on vault_add). 2FA is answered from a stored TOTP seed, or via a secure prompt to the owner. If it reports the login was blocked by an anti-automation wall, headed login is not available on a server — report that to the owner rather than retrying.",
         params: &[
             p_str_req("cred", "Name of a `login` credential in the vault."),
-            p_str("name", "Session name to seal into (default from the credential)."),
+            p_str(
+                "name",
+                "Session name to seal into (default from the credential).",
+            ),
         ],
         category: ToolCategory::AgentIdBrowser,
         execute: ToolExecutor::Async(exec_browser_auto_login),
@@ -567,7 +701,10 @@ pub const TOOL_DEFS: &[ToolDef] = &[
         name: "alien_browser_act",
         description: "Run a browser action in an open session. `action` is a verb (snapshot, click, type, navigate, page-text, wait, tabs, tab-new, screenshot, get, scroll, press, …) and `params` its flags (e.g. {\"ref\":\"e3\",\"text\":\"hi\"}). For credential injection use the dedicated fill tools.",
         params: &[
-            p_str_req("action", "Browser verb to run (bare verb only — flags go in `params`)."),
+            p_str_req(
+                "action",
+                "Browser verb to run (bare verb only — flags go in `params`).",
+            ),
             p_obj(
                 "params",
                 "Flags for the verb as key/value pairs, e.g. {\"url\": \"https://example.com\"} for navigate or {\"ref\": \"e3\", \"text\": \"hi\"} for type. `true` becomes a bare flag, arrays are comma-joined.",
@@ -582,7 +719,10 @@ pub const TOOL_DEFS: &[ToolDef] = &[
         description: "Type a vault secret into a form field WITHOUT exposing it to you: the session process unlocks the vault, reads the value, and types it. You pass only the element ref and credential (name.field). Refused for sealed fields and off-allowlist hosts.",
         params: &[
             p_str_req("ref", "Element ref from a snapshot (e.g. e5)."),
-            p_str_req("cred", "Credential reference as name.field (e.g. github.password)."),
+            p_str_req(
+                "cred",
+                "Credential reference as name.field (e.g. github.password).",
+            ),
             p_bool("submit", "Press Enter after filling."),
             p_str("name", "Session name (default 'main')."),
         ],
@@ -594,7 +734,10 @@ pub const TOOL_DEFS: &[ToolDef] = &[
         description: "Type the current 2FA code into a field WITHOUT exposing it to you: generated from the credential's stored TOTP seed, or prompted from the owner. Refused for off-allowlist hosts.",
         params: &[
             p_str_req("ref", "Element ref from a snapshot."),
-            p_str_req("cred", "Credential name carrying the TOTP seed (login or totp)."),
+            p_str_req(
+                "cred",
+                "Credential name carrying the TOTP seed (login or totp).",
+            ),
             p_str("name", "Session name (default 'main')."),
         ],
         category: ToolCategory::AgentIdBrowser,
@@ -604,7 +747,7 @@ pub const TOOL_DEFS: &[ToolDef] = &[
 
 #[cfg(test)]
 mod tests {
-    use super::note_secret_collected;
+    use super::{is_http_url, note_secret_collected};
     use serde_json::Value;
 
     #[test]
@@ -612,8 +755,14 @@ mod tests {
         let out = note_secret_collected(r#"{"ok":true,"name":"LinkedIn"}"#.to_string(), true);
         let v: Value = serde_json::from_str(&out).unwrap();
         let note = v.get("note").and_then(Value::as_str).unwrap();
-        assert!(note.contains("THIS chat"), "hosted note names the in-chat card");
-        assert!(note.contains("already"), "note states the fill already happened");
+        assert!(
+            note.contains("THIS chat"),
+            "hosted note names the in-chat card"
+        );
+        assert!(
+            note.contains("already"),
+            "note states the fill already happened"
+        );
         assert!(
             note.contains("Do NOT tell them to open"),
             "note forbids the go-to-an-app instruction",
@@ -627,7 +776,10 @@ mod tests {
         let out = note_secret_collected(r#"{"ok":true}"#.to_string(), false);
         let v: Value = serde_json::from_str(&out).unwrap();
         let note = v.get("note").and_then(Value::as_str).unwrap();
-        assert!(note.contains("browser form"), "local note names the browser form");
+        assert!(
+            note.contains("browser form"),
+            "local note names the browser form"
+        );
         assert!(!note.contains("THIS chat"));
     }
 
@@ -636,6 +788,18 @@ mod tests {
         let src = r#"{"ok":false,"error":"boom"}"#;
         assert_eq!(note_secret_collected(src.to_string(), true), src);
         // Non-JSON passes through verbatim too.
-        assert_eq!(note_secret_collected("not json".to_string(), true), "not json");
+        assert_eq!(
+            note_secret_collected("not json".to_string(), true),
+            "not json"
+        );
+    }
+
+    #[test]
+    fn hosted_browser_urls_reject_local_file_schemes() {
+        assert!(is_http_url("https://example.com"));
+        assert!(is_http_url(" HTTP://example.com/path "));
+        assert!(!is_http_url("file:///etc/passwd"));
+        assert!(!is_http_url("data:text/plain,secret"));
+        assert!(!is_http_url("javascript:alert(1)"));
     }
 }

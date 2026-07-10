@@ -138,7 +138,8 @@ impl ApiState {
         let (stream_tx, _) = broadcast::channel(PROACTIVE_QUEUE_DEPTH);
         // Hosted secure-input: the hub emits `secure_input.*` onto the same
         // `/events` broadcast the frontend already consumes.
-        let secure_prompt = if crate::agent_id::is_enabled() && crate::agent_id::secure_prompt_hosted()
+        let secure_prompt = if crate::agent_id::is_enabled()
+            && crate::agent_id::secure_prompt_hosted()
         {
             let socket_path = crate::agent_id::secure_prompt_socket_path(&settings);
             let tx = stream_tx.clone();

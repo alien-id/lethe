@@ -35,7 +35,8 @@ pub type SharedActorRegistry = ActorRuntime;
 /// Controls which built-in capabilities exist for a turn. `HostedSafe` is an
 /// allowlist enforced both while schemas are assembled and again at dispatch,
 /// so a model cannot invoke a hidden local capability by name. It retains the
-/// headless browser family; callers must provide tenant-private cache paths.
+/// headless browser and Alien identity/vault families; callers must provide
+/// tenant-private cache and agent-id state paths.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum ToolPolicy {
     #[default]
@@ -56,6 +57,9 @@ impl ToolPolicy {
                     || name.starts_with("note_")
                     || name.starts_with("todo_")
                     || name.starts_with("browser_")
+                    || name.starts_with("agent_id_")
+                    || name.starts_with("vault_")
+                    || name.starts_with("alien_browser_")
             }
         }
     }
@@ -78,6 +82,10 @@ pub struct ToolRuntime {
     /// end-to-end-sealed credential cards in the frontend and emit identity
     /// lifecycle events.
     pub secure_prompt: Option<crate::agent_id::secure_prompt::SecurePromptHub>,
+    /// Tenant-private agent-id identity, vault, and sealed-browser state. A
+    /// multiplexed host must set this on every turn; standalone Lethe falls
+    /// back to its process-local configured state directory.
+    pub agent_id_state_dir: Option<std::path::PathBuf>,
     /// Trusted remote tools advertised by the lethe-hosted plugin gateway.
     /// The client owns a short-lived catalog cache, so the synchronous schema
     /// assembly path never performs network I/O.
@@ -96,6 +104,7 @@ impl std::fmt::Debug for ToolRuntime {
             .field("actor", &self.actor.is_some())
             .field("observer", &self.observer.is_some())
             .field("secure_prompt", &self.secure_prompt.is_some())
+            .field("agent_id_state_dir", &self.agent_id_state_dir)
             .field("hosted_plugins", &self.hosted_plugins.is_some())
             .field("policy", &self.policy)
             .field("requested_tools", &self.requested_tools)
@@ -276,6 +285,9 @@ pub struct ToolContextShape {
     pub has_telegram: bool,
     /// Client (web/desktop chat) transport attached (neutral chat egress).
     pub has_client: bool,
+    /// A tenant-private identity/vault directory is attached. Required by the
+    /// hosted-safe policy so a mux can never fall back to process-global state.
+    pub has_agent_id_state: bool,
     pub policy: ToolPolicy,
 }
 
@@ -288,6 +300,7 @@ pub fn requestable_tools_directory_for(runtime: &ToolRuntime) -> String {
             .is_some_and(|context| context.is_subagent),
         has_telegram: runtime.telegram.is_some(),
         has_client: runtime.client.is_some(),
+        has_agent_id_state: runtime.agent_id_state_dir.is_some(),
         policy: runtime.policy,
     });
     let Some(client) = runtime.hosted_plugins.as_ref() else {
@@ -318,20 +331,30 @@ pub fn requestable_tools_directory_for_shape(shape: ToolContextShape) -> String 
         is_subagent,
         has_telegram,
         has_client,
+        has_agent_id_state,
         policy,
     } = shape;
 
     let visible = |def: &crate::tools::spec::ToolDef| match def.category {
         ToolCategory::Initial | ToolCategory::Requestable | ToolCategory::CortexOnly => true,
         // Built-in browser hides when the vault-sealed browser is active.
-        ToolCategory::BrowserBuiltin => !crate::agent_id::browser_tools_available(),
+        ToolCategory::BrowserBuiltin => {
+            !(crate::agent_id::browser_tools_available()
+                && (policy != ToolPolicy::HostedSafe || has_agent_id_state))
+        }
         ToolCategory::Actor => has_actor,
         ToolCategory::ActorSubagent => is_subagent,
         ToolCategory::Transport => has_telegram,
         ToolCategory::TransportClient => has_client && !has_telegram,
         ToolCategory::KnowledgeGraph => crate::tools::knowledge_graph::is_configured(),
-        ToolCategory::AgentId => crate::agent_id::vault_tools_available(),
-        ToolCategory::AgentIdBrowser => crate::agent_id::browser_tools_available(),
+        ToolCategory::AgentId => {
+            crate::agent_id::vault_tools_available()
+                && (policy != ToolPolicy::HostedSafe || has_agent_id_state)
+        }
+        ToolCategory::AgentIdBrowser => {
+            crate::agent_id::browser_tools_available()
+                && (policy != ToolPolicy::HostedSafe || has_agent_id_state)
+        }
     } && policy.allows_builtin(def.name);
     let initial = |def: &crate::tools::spec::ToolDef| match def.category {
         ToolCategory::Initial => true,

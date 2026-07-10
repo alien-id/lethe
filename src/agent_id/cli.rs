@@ -110,7 +110,10 @@ async fn run_command(cmd: Command, timeout: Duration) -> Result<CliResult, Strin
     wait_parsed(&mut child, timeout).await
 }
 
-async fn wait_parsed(child: &mut tokio::process::Child, timeout: Duration) -> Result<CliResult, String> {
+async fn wait_parsed(
+    child: &mut tokio::process::Child,
+    timeout: Duration,
+) -> Result<CliResult, String> {
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
 
@@ -148,7 +151,9 @@ async fn wait_parsed(child: &mut tokio::process::Child, timeout: Duration) -> Re
             let detail = stderr_str.trim();
             let detail = if detail.is_empty() { trimmed } else { detail };
             let detail: String = detail.chars().take(400).collect();
-            Err(format!("agent-id CLI produced no JSON (exit {code}): {detail}"))
+            Err(format!(
+                "agent-id CLI produced no JSON (exit {code}): {detail}"
+            ))
         }
     }
 }

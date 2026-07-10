@@ -63,7 +63,11 @@ impl<'a> ToolRegistry<'a> {
             ToolCategory::Initial | ToolCategory::Requestable | ToolCategory::CortexOnly => true,
             // The built-in browser hides when the vault-sealed browser is active,
             // so the agent is never offered two competing browsers.
-            ToolCategory::BrowserBuiltin => !crate::agent_id::browser_tools_available(),
+            ToolCategory::BrowserBuiltin => {
+                !(crate::agent_id::browser_tools_available()
+                    && (self.runtime.policy != super::ToolPolicy::HostedSafe
+                        || self.runtime.agent_id_state_dir.is_some()))
+            }
             ToolCategory::Actor => self.runtime.actor.is_some(),
             ToolCategory::ActorSubagent => self
                 .runtime
@@ -75,8 +79,16 @@ impl<'a> ToolRegistry<'a> {
                 self.runtime.client.is_some() && self.runtime.telegram.is_none()
             }
             ToolCategory::KnowledgeGraph => knowledge_graph::is_configured(),
-            ToolCategory::AgentId => crate::agent_id::vault_tools_available(),
-            ToolCategory::AgentIdBrowser => crate::agent_id::browser_tools_available(),
+            ToolCategory::AgentId => {
+                crate::agent_id::vault_tools_available()
+                    && (self.runtime.policy != super::ToolPolicy::HostedSafe
+                        || self.runtime.agent_id_state_dir.is_some())
+            }
+            ToolCategory::AgentIdBrowser => {
+                crate::agent_id::browser_tools_available()
+                    && (self.runtime.policy != super::ToolPolicy::HostedSafe
+                        || self.runtime.agent_id_state_dir.is_some())
+            }
         }
     }
 

@@ -95,10 +95,7 @@ fn exec_kg_search(_registry: &ToolRegistry<'_>, args: &Value) -> String {
         return error_json("'query' is required.");
     }
     let limit = usize_arg(args, "limit", 20).clamp(1, 50);
-    kg_get(
-        "/search",
-        &[("q", query), ("limit", limit.to_string())],
-    )
+    kg_get("/search", &[("q", query), ("limit", limit.to_string())])
 }
 
 fn exec_kg_get(_registry: &ToolRegistry<'_>, args: &Value) -> String {
@@ -158,7 +155,10 @@ pub const TOOL_DEFS: &[ToolDef] = &[
         name: "kg_search",
         description: "Search the user's knowledge graph (people, places, companies extracted from your conversations). Matches names, aliases, notes and contact details; returns entities with ids for the other kg_* tools.",
         params: &[
-            p_str_req("query", "Search text (name, alias, or words from the notes)."),
+            p_str_req(
+                "query",
+                "Search text (name, alias, or words from the notes).",
+            ),
             p_int("limit", "Max results (1-50, default 20)."),
         ],
         category: ToolCategory::KnowledgeGraph,
@@ -205,7 +205,10 @@ pub const TOOL_DEFS: &[ToolDef] = &[
         params: &[
             p_int_req("id", "Entity id (from kg_search)."),
             p_str_req("content", "Markdown notes content."),
-            p_bool("append", "Append below the existing notes instead of replacing (default false)."),
+            p_bool(
+                "append",
+                "Append below the existing notes instead of replacing (default false).",
+            ),
         ],
         category: ToolCategory::KnowledgeGraph,
         execute: ToolExecutor::Sync(exec_kg_set_notes),

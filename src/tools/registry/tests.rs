@@ -244,6 +244,12 @@ fn executes_files_memory_notes_and_shell_tools() {
 
 #[test]
 fn hosted_safe_policy_exposes_memory_but_blocks_local_execution() {
+    assert!(ToolPolicy::HostedSafe.allows_builtin("agent_id_status"));
+    assert!(ToolPolicy::HostedSafe.allows_builtin("vault_list"));
+    assert!(ToolPolicy::HostedSafe.allows_builtin("alien_browser_open"));
+    assert!(!ToolPolicy::HostedSafe.allows_builtin("read_file"));
+    assert!(!ToolPolicy::HostedSafe.allows_builtin("bash"));
+
     let (_tmp, memory, shell) = registry();
     let registry = ToolRegistry::with_runtime(
         &memory,

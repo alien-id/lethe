@@ -162,7 +162,12 @@ impl SecurePromptHub {
     /// User-initiated dismissal. Dropping the entry drops the oneshot sender,
     /// which the socket task observes and reports as cancelled.
     pub fn cancel(&self, request_id: &str) -> bool {
-        self.inner.pending.lock().unwrap().remove(request_id).is_some()
+        self.inner
+            .pending
+            .lock()
+            .unwrap()
+            .remove(request_id)
+            .is_some()
     }
 
     fn emit(&self, event: &str, data: Value) {
@@ -261,7 +266,12 @@ async fn handle_conn(hub: SecurePromptHub, stream: UnixStream) -> std::io::Resul
     let spec: Value = match serde_json::from_slice(&body) {
         Ok(spec) => spec,
         Err(_) => {
-            write_http(&mut write_half, 400, &json!({ "error": "invalid spec json" })).await?;
+            write_http(
+                &mut write_half,
+                400,
+                &json!({ "error": "invalid spec json" }),
+            )
+            .await?;
             return Ok(());
         }
     };
@@ -346,7 +356,12 @@ fn build_payloads(
     server: &ServerEphemeral,
     expires_at: u64,
 ) -> (Value, Value) {
-    let str_field = |key: &str| spec.get(key).and_then(Value::as_str).unwrap_or("").to_string();
+    let str_field = |key: &str| {
+        spec.get(key)
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string()
+    };
     let title = str_field("title");
     let description = str_field("description");
     let label = str_field("label");
@@ -445,7 +460,10 @@ async fn read_http_request(
         if buf.len() > 64 * 1024 {
             return Err("header too large".into());
         }
-        let n = read_half.read(&mut chunk).await.map_err(|e| e.to_string())?;
+        let n = read_half
+            .read(&mut chunk)
+            .await
+            .map_err(|e| e.to_string())?;
         if n == 0 {
             return Err("connection closed before request".into());
         }
@@ -470,7 +488,10 @@ async fn read_http_request(
 
     let mut body = buf[header_end..].to_vec();
     while body.len() < content_length {
-        let n = read_half.read(&mut chunk).await.map_err(|e| e.to_string())?;
+        let n = read_half
+            .read(&mut chunk)
+            .await
+            .map_err(|e| e.to_string())?;
         if n == 0 {
             break;
         }
@@ -570,7 +591,10 @@ mod tests {
 
     #[test]
     fn strip_html_removes_tags() {
-        assert_eq!(strip_html("Uses <code>AES-256-GCM</code> once."), "Uses AES-256-GCM once.");
+        assert_eq!(
+            strip_html("Uses <code>AES-256-GCM</code> once."),
+            "Uses AES-256-GCM once."
+        );
         assert_eq!(strip_html("plain"), "plain");
     }
 
@@ -665,7 +689,10 @@ mod tests {
 
         let values = br#"{"password":"hunter2"}"#;
         let sealed = crate::agent_id::crypto::seal_for_test(server_pub, request_id, values);
-        assert!(matches!(hub.submit(request_id, &sealed), SubmitOutcome::Accepted));
+        assert!(matches!(
+            hub.submit(request_id, &sealed),
+            SubmitOutcome::Accepted
+        ));
 
         let (status, body) = cli.await.unwrap();
         assert_eq!(status, 200);
@@ -702,7 +729,11 @@ mod tests {
 
         let cli_socket = socket.clone();
         let cli = tokio::spawn(async move {
-            cli_post(&cli_socket, &json!({ "title": "x", "fields": [] }).to_string()).await
+            cli_post(
+                &cli_socket,
+                &json!({ "title": "x", "fields": [] }).to_string(),
+            )
+            .await
         });
 
         let event = wait_for_request(&events).await;
@@ -720,11 +751,19 @@ mod tests {
             hub.submit(&request_id, &garbage),
             SubmitOutcome::BadCiphertext(_)
         ));
-        assert_eq!(hub.list_pending().len(), 1, "request must survive a bad submit");
+        assert_eq!(
+            hub.list_pending().len(),
+            1,
+            "request must survive a bad submit"
+        );
 
         // A genuine submission still succeeds afterwards.
-        let sealed = crate::agent_id::crypto::seal_for_test(&server_pub, &request_id, br#"{"a":"b"}"#);
-        assert!(matches!(hub.submit(&request_id, &sealed), SubmitOutcome::Accepted));
+        let sealed =
+            crate::agent_id::crypto::seal_for_test(&server_pub, &request_id, br#"{"a":"b"}"#);
+        assert!(matches!(
+            hub.submit(&request_id, &sealed),
+            SubmitOutcome::Accepted
+        ));
         let (status, _body) = cli.await.unwrap();
         assert_eq!(status, 200);
     }

@@ -111,7 +111,11 @@ impl std::fmt::Display for UnsealError {
 
 /// Unseal the envelope into the plaintext JSON bytes (the values object). The
 /// caller is responsible for zeroizing the returned buffer once consumed.
-pub fn unseal(server: &ServerEphemeral, sealed: &SealedInput, request_id: &str) -> Result<Vec<u8>, UnsealError> {
+pub fn unseal(
+    server: &ServerEphemeral,
+    sealed: &SealedInput,
+    request_id: &str,
+) -> Result<Vec<u8>, UnsealError> {
     let client_pub_bytes = B64
         .decode(sealed.client_pub.as_bytes())
         .map_err(|_| UnsealError::Base64("client_pub"))?;
@@ -129,17 +133,20 @@ pub fn unseal(server: &ServerEphemeral, sealed: &SealedInput, request_id: &str) 
         return Err(UnsealError::BadLength("iv"));
     }
 
-    let client_pub = PublicKey::from_sec1_bytes(&client_pub_bytes).map_err(|_| UnsealError::ClientKey)?;
+    let client_pub =
+        PublicKey::from_sec1_bytes(&client_pub_bytes).map_err(|_| UnsealError::ClientKey)?;
 
     // ECDH → 32-byte shared X coordinate.
-    let shared = p256::ecdh::diffie_hellman(server.secret.to_nonzero_scalar(), client_pub.as_affine());
+    let shared =
+        p256::ecdh::diffie_hellman(server.secret.to_nonzero_scalar(), client_pub.as_affine());
     let mut ikm = shared.raw_secret_bytes().to_vec();
 
     // HKDF-SHA256 → 32-byte AES key.
     let hk = Hkdf::<Sha256>::new(Some(&salt), &ikm);
     let mut key = [0u8; 32];
     // `expand` only fails for absurd output lengths; 32 bytes never does.
-    hk.expand(HKDF_INFO, &mut key).map_err(|_| UnsealError::Decrypt)?;
+    hk.expand(HKDF_INFO, &mut key)
+        .map_err(|_| UnsealError::Decrypt)?;
     ikm.zeroize();
 
     // AES-256-GCM with AAD = request_id ‖ server_pub.
@@ -173,7 +180,11 @@ pub fn unseal(server: &ServerEphemeral, sealed: &SealedInput, request_id: &str) 
 /// crypto roundtrip tests and the secure-prompt socket integration test to prove
 /// the Rust unseal is wire-compatible with the browser.
 #[cfg(test)]
-pub(crate) fn seal_for_test(server_pub_b64: &str, request_id: &str, values_json: &[u8]) -> SealedInput {
+pub(crate) fn seal_for_test(
+    server_pub_b64: &str,
+    request_id: &str,
+    values_json: &[u8],
+) -> SealedInput {
     use aes_gcm::aead::Aead;
 
     let server_pub_bytes = B64.decode(server_pub_b64).unwrap();
@@ -187,9 +198,14 @@ pub(crate) fn seal_for_test(server_pub_b64: &str, request_id: &str, values_json:
             break s;
         }
     };
-    let client_pub_point = client_secret.public_key().to_encoded_point(false).as_bytes().to_vec();
+    let client_pub_point = client_secret
+        .public_key()
+        .to_encoded_point(false)
+        .as_bytes()
+        .to_vec();
 
-    let shared = p256::ecdh::diffie_hellman(client_secret.to_nonzero_scalar(), server_pub.as_affine());
+    let shared =
+        p256::ecdh::diffie_hellman(client_secret.to_nonzero_scalar(), server_pub.as_affine());
 
     let mut salt = [0u8; 32];
     rand::rng().fill_bytes(&mut salt);
@@ -205,7 +221,13 @@ pub(crate) fn seal_for_test(server_pub_b64: &str, request_id: &str, values_json:
     rand::rng().fill_bytes(&mut iv);
     let cipher = Aes256Gcm::new_from_slice(&key).unwrap();
     let ct = cipher
-        .encrypt(Nonce::from_slice(&iv), Payload { msg: values_json, aad: &aad })
+        .encrypt(
+            Nonce::from_slice(&iv),
+            Payload {
+                msg: values_json,
+                aad: &aad,
+            },
+        )
         .unwrap();
 
     SealedInput {
@@ -220,7 +242,11 @@ pub(crate) fn seal_for_test(server_pub_b64: &str, request_id: &str, values_json:
 mod tests {
     use super::*;
 
-    fn seal_like_browser(server_pub_b64: &str, request_id: &str, values_json: &[u8]) -> SealedInput {
+    fn seal_like_browser(
+        server_pub_b64: &str,
+        request_id: &str,
+        values_json: &[u8],
+    ) -> SealedInput {
         seal_for_test(server_pub_b64, request_id, values_json)
     }
 

@@ -813,7 +813,8 @@ async fn provision_agent_id(settings: &Settings) {
     }
     lethe::agent_id::ensure_provisioned(settings).await;
     let sd = lethe::agent_id::state_dir(settings);
-    let status = lethe::agent_id::cli::run_json(lethe::agent_id::cli::Bin::Core, &sd, &["status"]).await;
+    let status =
+        lethe::agent_id::cli::run_json(lethe::agent_id::cli::Bin::Core, &sd, &["status"]).await;
     let assurance = status
         .get("assurance")
         .and_then(|v| v.as_str())

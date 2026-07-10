@@ -181,6 +181,14 @@ fn is_executable(path: &Path) -> bool {
 /// initialize the vault (agent-key slot) if none exists. Idempotent; degrades to
 /// a warning if the CLIs are missing or fail, leaving Lethe otherwise usable.
 pub async fn ensure_provisioned(settings: &Settings) {
+    set_state_dir(settings);
+    ensure_provisioned_at(&state_dir(settings)).await;
+}
+
+/// Provision one tenant's identity + vault without touching the process-global
+/// standalone state cache. Multiplexed hosts call this with a tenant-private
+/// directory before exposing the agent-id tools for that tenant.
+pub async fn ensure_provisioned_at(sd: &Path) {
     if !is_enabled() {
         return;
     }
@@ -192,22 +200,24 @@ pub async fn ensure_provisioned(settings: &Settings) {
         return;
     }
 
-    set_state_dir(settings);
-    let sd = state_dir(settings);
-    if let Err(err) = std::fs::create_dir_all(&sd) {
+    if let Err(err) = std::fs::create_dir_all(sd) {
         tracing::warn!(error = %err, dir = %sd.display(), "agent-id: could not create state dir");
         return;
     }
-    set_private_dir(&sd);
+    set_private_dir(sd);
 
     // Identity (L0 is instant, no network).
-    let status = cli::run_json(cli::Bin::Core, &sd, &["status"]).await;
-    let initialized = status.get("initialized").and_then(serde_json::Value::as_bool);
+    let status = cli::run_json(cli::Bin::Core, sd, &["status"]).await;
+    let initialized = status
+        .get("initialized")
+        .and_then(serde_json::Value::as_bool);
     if initialized == Some(false) {
-        let init = cli::run_json(cli::Bin::Core, &sd, &["init"]).await;
+        let init = cli::run_json(cli::Bin::Core, sd, &["init"]).await;
         match init.get("fingerprint").and_then(serde_json::Value::as_str) {
             Some(fp) => tracing::info!(fingerprint = %fp, "agent-id: created L0 identity"),
-            None => tracing::warn!(result = %init, "agent-id: identity init returned no fingerprint"),
+            None => {
+                tracing::warn!(result = %init, "agent-id: identity init returned no fingerprint")
+            }
         }
     }
 
@@ -215,11 +225,35 @@ pub async fn ensure_provisioned(settings: &Settings) {
     // for "not found", so string-matching its message would be brittle).
     let vault_file = sd.join("vault.enc");
     if !vault_file.exists() {
-        let init = cli::run_json(cli::Bin::Vault, &sd, &["init"]).await;
+        let init = cli::run_json(cli::Bin::Vault, sd, &["init"]).await;
         if init.get("ok").and_then(serde_json::Value::as_bool) == Some(true) {
             tracing::info!("agent-id: initialized credential vault (agent-key slot)");
         } else {
             tracing::warn!(result = %init, "agent-id: vault init did not report ok");
+        }
+    }
+}
+
+/// Close and reseal every live vault-browser session for one tenant. Hosted
+/// multiplexers call this after each turn so Chromium and plaintext working
+/// profiles never remain resident while the user is idle.
+pub async fn close_browser_sessions(sd: &Path) {
+    if !browser_tools_available() {
+        return;
+    }
+    let sessions = cli::run_json(cli::Bin::Browser, sd, &["sessions"]).await;
+    let names = sessions
+        .get("sessions")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| entry.get("name").and_then(serde_json::Value::as_str))
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    for name in names {
+        let result = cli::run_json(cli::Bin::Browser, sd, &["close", "--name", &name]).await;
+        if result.get("ok").and_then(serde_json::Value::as_bool) != Some(true) {
+            tracing::warn!(session = %name, result = %result, "agent-id browser cleanup failed");
         }
     }
 }
