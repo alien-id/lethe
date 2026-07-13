@@ -89,6 +89,15 @@ impl MemoryStore {
 
         fs::create_dir_all(&workspace_dir)?;
         fs::create_dir_all(workspace_dir.join("projects"))?;
+        // Verifier-pattern scaffold: prompts reference these directories for
+        // Phase 0 (criteria), Phase 0.5 (plan), and Phase 2 (verification log).
+        // Plans are required for multi-step state-touching work; they
+        // recurse with bounded depth so each sub-step is itself well-defined.
+        // Empty dirs are cheap; missing dirs break the workflow the prompts
+        // describe.
+        fs::create_dir_all(workspace_dir.join("acceptance_criteria"))?;
+        fs::create_dir_all(workspace_dir.join("plans"))?;
+        fs::create_dir_all(workspace_dir.join("verification_logs"))?;
         ensure_skills_bootstrap(&workspace_dir.join("skills"))?;
 
         let blocks = BlockManager::new(workspace_dir.join("memory"))?;
@@ -520,6 +529,9 @@ mod tests {
 
         assert!(store.workspace_dir().join("skills/README.md").exists());
         assert!(store.workspace_dir().join("projects").exists());
+        assert!(store.workspace_dir().join("acceptance_criteria").exists());
+        assert!(store.workspace_dir().join("plans").exists());
+        assert!(store.workspace_dir().join("verification_logs").exists());
         let labels = store
             .blocks
             .list_blocks(true)

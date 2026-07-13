@@ -194,9 +194,11 @@ async fn spawn_chain(registry: &ToolRegistry<'_>, args: &Value) -> String {
     let tools = string_arg_default(args, "tools", "");
     let model = string_arg_default(args, "model", "aux");
     let max_turns = usize_arg(args, "max_turns", 20).max(1);
+    let continue_on_failure = bool_arg(args, "continue_on_failure", false);
     let chain_id = Uuid::new_v4().to_string()[..6].to_string();
     let mut previous_result = String::new();
     let mut summaries = Vec::new();
+    let mut failed_steps: Vec<usize> = Vec::new();
 
     for (index, step) in steps.into_iter().enumerate() {
         let base_name = step
@@ -226,7 +228,22 @@ async fn spawn_chain(registry: &ToolRegistry<'_>, args: &Value) -> String {
         let child_id = match spawn {
             Ok(SpawnReport::Spawned { actor_id, .. }) => actor_id,
             Ok(SpawnReport::Rejected { message }) | Err(message) => {
-                return format!("Chain stopped at step {} ({name}):\n{message}", index + 1);
+                // Spawn failure is treated as a step failure; honors continue_on_failure
+                // and the per-step `critical` override.
+                summaries.push(format!(
+                    "Step {} ({name}, spawn-rejected): {message}",
+                    index + 1
+                ));
+                failed_steps.push(index + 1);
+                if !continue_on_failure || step.critical {
+                    return format!(
+                        "Chain stopped at step {} ({name}):\n{}",
+                        index + 1,
+                        summaries.join("\n")
+                    );
+                }
+                previous_result.clear();
+                continue;
             }
         };
 
@@ -266,18 +283,38 @@ async fn spawn_chain(registry: &ToolRegistry<'_>, args: &Value) -> String {
             truncate_with_ellipsis(&result, 200)
         ));
         if outcome.is_failed() {
-            return format!(
-                "Chain stopped at step {} ({name}):\n{}",
-                index + 1,
-                summaries.join("\n")
-            );
+            failed_steps.push(index + 1);
+            if !continue_on_failure || step.critical {
+                return format!(
+                    "Chain stopped at step {} ({name}):\n{}",
+                    index + 1,
+                    summaries.join("\n")
+                );
+            }
+            // Continue: clear forward-passed result so the next step's
+            // {previous} doesn't carry stale data from a failed step.
+            previous_result.clear();
+            continue;
         }
         previous_result = result;
     }
 
+    let header = if failed_steps.is_empty() {
+        format!("Chain complete ({} steps):", summaries.len())
+    } else {
+        format!(
+            "Chain finished ({} steps, {} failed: {}):",
+            summaries.len(),
+            failed_steps.len(),
+            failed_steps
+                .iter()
+                .map(usize::to_string)
+                .collect::<Vec<_>>()
+                .join(",")
+        )
+    };
     format!(
-        "Chain complete ({} steps):\n{}\n\nFinal result:\n{}",
-        summaries.len(),
+        "{header}\n{}\n\nFinal result:\n{}",
         summaries.join("\n"),
         truncate_with_ellipsis(&previous_result, 1000)
     )
@@ -289,6 +326,10 @@ struct ChainStep {
     name: Option<String>,
     #[serde(default)]
     goals: String,
+    /// When true, this step's failure aborts the whole chain even if
+    /// `continue_on_failure` is set on the parent call. Default false.
+    #[serde(default)]
+    critical: bool,
 }
 
 pub const TOOL_DEFS: &[ToolDef] = &[
@@ -342,11 +383,17 @@ pub const TOOL_DEFS: &[ToolDef] = &[
         params: &[
             p_str_req(
                 "steps",
-                "JSON [{name, goals}]; {previous} expands to last result.",
+                "JSON [{name, goals, critical?}]; {previous} expands to last result. \
+                 Set step.critical=true to force-abort even when continue_on_failure is set.",
             ),
             p_str("tools", "Extra tools for all steps."),
             p_str("model", "main or aux."),
             p_int("max_turns", "Max LLM turns per step."),
+            p_bool(
+                "continue_on_failure",
+                "If true, record step failures and advance to the next step \
+                 (clearing {previous}). Steps marked critical:true still abort the chain.",
+            ),
         ],
         category: ToolCategory::Actor,
         execute: ToolExecutor::Async(exec_spawn_chain),
