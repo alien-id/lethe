@@ -237,6 +237,17 @@ impl OpenAIAdapter {
 
 		// -- Build the basic payload
 
+		// Lethe fork: OpenAI reasoning-era models (o-series, gpt-5 family) have
+		// stricter Chat Completions rules — `max_tokens` must be sent as
+		// `max_completion_tokens`, and sampling params like `temperature`/`top_p`
+		// are a hard 400 unless left at their defaults. Only applies to the
+		// direct OpenAI adapter; compatible providers keep the classic fields.
+		let (use_max_completion_tokens, reject_sampling_params) = if matches!(adapter_kind, AdapterKind::OpenAI) {
+			openai_reasoning_era_rules(model_name)
+		} else {
+			(false, false)
+		};
+
 		let OpenAIRequestParts { messages, tools } = Self::into_openai_request_parts(&model, chat_req)?;
 		let mut payload = json!({
 			"model": model_name,
@@ -305,7 +316,9 @@ impl OpenAIAdapter {
 			payload.x_insert("stream_options", json!({"include_usage": true}))?;
 		}
 
-		if let Some(temperature) = options_set.temperature() {
+		if let Some(temperature) = options_set.temperature()
+			&& !reject_sampling_params
+		{
 			payload.x_insert("temperature", temperature)?;
 		}
 
@@ -313,14 +326,21 @@ impl OpenAIAdapter {
 			payload.x_insert("stop", options_set.stop_sequences())?;
 		}
 
+		let max_tokens_key = if use_max_completion_tokens {
+			"max_completion_tokens"
+		} else {
+			"max_tokens"
+		};
 		if let Some(max_tokens) = options_set.max_tokens() {
-			payload.x_insert("max_tokens", max_tokens)?;
+			payload.x_insert(max_tokens_key, max_tokens)?;
 		} else if let Some(custom) = custom.as_ref()
 			&& let Some(max_tokens) = custom.default_max_tokens
 		{
-			payload.x_insert("max_tokens", max_tokens)?;
+			payload.x_insert(max_tokens_key, max_tokens)?;
 		}
-		if let Some(top_p) = options_set.top_p() {
+		if let Some(top_p) = options_set.top_p()
+			&& !reject_sampling_params
+		{
 			payload.x_insert("top_p", top_p)?;
 		}
 		if let Some(seed) = options_set.seed() {
@@ -666,6 +686,31 @@ fn cache_control_value(control: CacheControl) -> Value {
 
 // endregion: --- Lethe fork cache_control helpers
 
+// region:    --- Lethe fork reasoning-era param rules
+
+/// Lethe fork: Chat Completions parameter rules for OpenAI reasoning-era
+/// models. Returns `(use_max_completion_tokens, reject_sampling_params)`.
+///
+/// The o-series (o1/o3/o4…) and the whole gpt-5 family (gpt-5, gpt-5.x,
+/// gpt-5-mini, …) reject `max_tokens` with a 400 and require
+/// `max_completion_tokens` instead. The same models reject non-default
+/// sampling params (`temperature`, `top_p`) — except the `gpt-5-chat*`
+/// conversational variants, which still support sampling but share the
+/// `max_completion_tokens` requirement.
+fn openai_reasoning_era_rules(model_name: &str) -> (bool, bool) {
+	let bytes = model_name.as_bytes();
+	// "o1", "o3-mini", "o4-mini", … but not e.g. "olive" or "o200k".
+	let o_series = matches!(bytes, [b'o', d, ..] if d.is_ascii_digit())
+		&& (bytes.len() == 2 || bytes[2] == b'-' || bytes[2] == b'.');
+	let gpt5 = model_name.starts_with("gpt-5");
+	if !(o_series || gpt5) {
+		return (false, false);
+	}
+	(true, !model_name.starts_with("gpt-5-chat"))
+}
+
+// endregion: --- Lethe fork reasoning-era param rules
+
 #[cfg(test)]
 mod cache_control_tests {
 	use super::*;
@@ -734,5 +779,112 @@ mod cache_control_tests {
 		assert_eq!(parts.messages[0]["role"], json!("user"));
 		// User content stays a plain string when no parts split is needed.
 		assert_eq!(parts.messages[0]["content"], json!("hello"));
+	}
+}
+
+#[cfg(test)]
+mod reasoning_era_param_tests {
+	use super::*;
+	use crate::chat::{ChatMessage, ChatOptions};
+
+	fn openai_payload(model_name: &str, options: &ChatOptions) -> Value {
+		let target = ServiceTarget {
+			model: ModelIden::new(AdapterKind::OpenAI, model_name.to_string()),
+			auth: AuthData::from_single("test-key"),
+			endpoint: OpenAIAdapter::default_endpoint(),
+		};
+		let chat_req = ChatRequest::new(vec![ChatMessage::user("hi")]);
+		let options_set = ChatOptionsSet::default().with_chat_options(Some(options));
+		let data = OpenAIAdapter::util_to_web_request_data(
+			target,
+			ServiceType::ChatStream,
+			chat_req,
+			options_set,
+			None,
+		)
+		.unwrap();
+		data.payload
+	}
+
+	#[test]
+	fn gpt5_models_get_max_completion_tokens_and_no_temperature() {
+		let options = ChatOptions::default()
+			.with_temperature(0.7)
+			.with_max_tokens(8000)
+			.with_top_p(0.9);
+		for model in ["gpt-5.5", "gpt-5.4-mini", "gpt-5", "gpt-5-nano", "o3-mini", "o1"] {
+			let payload = openai_payload(model, &options);
+			assert_eq!(
+				payload["max_completion_tokens"],
+				json!(8000),
+				"{model} must send max_completion_tokens"
+			);
+			assert!(payload.get("max_tokens").is_none(), "{model} must not send max_tokens");
+			assert!(
+				payload.get("temperature").is_none(),
+				"{model} must not send temperature"
+			);
+			assert!(payload.get("top_p").is_none(), "{model} must not send top_p");
+		}
+	}
+
+	#[test]
+	fn reasoning_effort_suffix_still_triggers_the_rules() {
+		let options = ChatOptions::default().with_temperature(0.7).with_max_tokens(8000);
+		// "-high" is stripped into reasoning_effort; the rules must apply to the
+		// trimmed name that actually goes on the wire.
+		let payload = openai_payload("gpt-5.5-high", &options);
+		assert_eq!(payload["model"], json!("gpt-5.5"));
+		assert_eq!(payload["reasoning_effort"], json!("high"));
+		assert_eq!(payload["max_completion_tokens"], json!(8000));
+		assert!(payload.get("temperature").is_none());
+	}
+
+	#[test]
+	fn classic_models_keep_max_tokens_and_temperature() {
+		let options = ChatOptions::default().with_temperature(0.7).with_max_tokens(8000);
+		for model in ["gpt-4o", "gpt-4.1-mini"] {
+			let payload = openai_payload(model, &options);
+			assert_eq!(payload["max_tokens"], json!(8000), "{model} keeps max_tokens");
+			assert!(
+				payload.get("max_completion_tokens").is_none(),
+				"{model} must not send max_completion_tokens"
+			);
+			assert_eq!(payload["temperature"], json!(0.7), "{model} keeps temperature");
+		}
+	}
+
+	#[test]
+	fn gpt5_chat_variant_keeps_sampling_but_uses_max_completion_tokens() {
+		let options = ChatOptions::default().with_temperature(0.7).with_max_tokens(8000);
+		let payload = openai_payload("gpt-5-chat-latest", &options);
+		assert_eq!(payload["max_completion_tokens"], json!(8000));
+		assert!(payload.get("max_tokens").is_none());
+		assert_eq!(payload["temperature"], json!(0.7));
+	}
+
+	#[test]
+	fn rules_classify_model_families_correctly() {
+		// (model, use_max_completion_tokens, reject_sampling_params)
+		let cases = [
+			("gpt-5.5", true, true),
+			("gpt-5.4-mini", true, true),
+			("gpt-5-mini", true, true),
+			("gpt-5-chat-latest", true, false),
+			("o1", true, true),
+			("o3-mini", true, true),
+			("o4-mini", true, true),
+			("gpt-4o", false, false),
+			("gpt-4.1", false, false),
+			("olive-3", false, false),
+			("o200k-fake", false, false),
+		];
+		for (model, mct, reject) in cases {
+			assert_eq!(
+				openai_reasoning_era_rules(model),
+				(mct, reject),
+				"classification for {model}"
+			);
+		}
 	}
 }
