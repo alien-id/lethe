@@ -249,6 +249,10 @@ fn hosted_safe_policy_exposes_memory_but_blocks_local_execution() {
     assert!(ToolPolicy::HostedSafe.allows_builtin("alien_browser_open"));
     assert!(!ToolPolicy::HostedSafe.allows_builtin("read_file"));
     assert!(!ToolPolicy::HostedSafe.allows_builtin("bash"));
+    // The built-in browser is NOT a hosted capability — only the vault-sealed
+    // `alien_browser_*` is. It must not resurface under the hosted policy.
+    assert!(!ToolPolicy::HostedSafe.allows_builtin("browser_open"));
+    assert!(!ToolPolicy::HostedSafe.allows_builtin("browser_snapshot"));
 
     let (_tmp, memory, shell) = registry();
     let registry = ToolRegistry::with_runtime(
@@ -269,14 +273,21 @@ fn hosted_safe_policy_exposes_memory_but_blocks_local_execution() {
         .collect::<std::collections::HashSet<_>>();
     assert!(names.contains("memory_read"));
     assert!(names.contains("memory_update"));
-    assert!(names.contains("browser_open"));
+    // The built-in browser is not a hosted capability — hidden and unavailable
+    // under the hosted policy (hosted browsing is only the vault-sealed browser).
+    assert!(!names.contains("browser_open"));
     assert!(!names.contains("bash"));
     assert!(!names.contains("read_file"));
     assert!(!registry.tool_is_available("bash"));
-    assert!(registry.tool_is_available("browser_open"));
+    assert!(!registry.tool_is_available("browser_open"));
     assert!(
         registry
             .execute("bash", &json!({"command": "echo forbidden"}))
+            .contains("disabled by the active capability policy")
+    );
+    assert!(
+        registry
+            .execute("browser_open", &json!({"url": "https://example.com"}))
             .contains("disabled by the active capability policy")
     );
 }

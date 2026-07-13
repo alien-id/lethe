@@ -56,7 +56,11 @@ impl ToolPolicy {
                     || name.starts_with("conversation_")
                     || name.starts_with("note_")
                     || name.starts_with("todo_")
-                    || name.starts_with("browser_")
+                    // NOTE: the built-in `browser_*` tools (standalone
+                    // `agent-browser` CLI) are intentionally NOT allowed here.
+                    // They are not tenant-scoped through the hosted secure path
+                    // and bypass the host's browser-concurrency gate; hosted
+                    // browsing is exclusively the vault-sealed `alien_browser_*`.
                     || name.starts_with("agent_id_")
                     || name.starts_with("vault_")
                     || name.starts_with("alien_browser_")
@@ -337,10 +341,13 @@ pub fn requestable_tools_directory_for_shape(shape: ToolContextShape) -> String 
 
     let visible = |def: &crate::tools::spec::ToolDef| match def.category {
         ToolCategory::Initial | ToolCategory::Requestable | ToolCategory::CortexOnly => true,
-        // Built-in browser hides when the vault-sealed browser is active.
+        // The built-in browser is never offered under the hosted policy — it is
+        // not tenant-scoped through the secure path and isn't bounded by the
+        // host's browser-concurrency gate, so hosted browsing is exclusively the
+        // vault-sealed browser. Outside hosted, it hides when the vault-sealed
+        // browser is active (so the agent is never shown two competing browsers).
         ToolCategory::BrowserBuiltin => {
-            !(crate::agent_id::browser_tools_available()
-                && (policy != ToolPolicy::HostedSafe || has_agent_id_state))
+            policy != ToolPolicy::HostedSafe && !crate::agent_id::browser_tools_available()
         }
         ToolCategory::Actor => has_actor,
         ToolCategory::ActorSubagent => is_subagent,

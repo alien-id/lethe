@@ -210,9 +210,26 @@ async fn fast_json(bin: Bin, sd: &Path, argv: &[String]) -> Value {
     cli::run_json(bin, sd, &refs).await
 }
 
+/// Tracks which state dirs already have a live `bind` poller, so repeated
+/// `agent_id_bind` calls (a model retrying across turns) don't stack N
+/// concurrent 14-minute `agent-id-core bind` child processes against one
+/// pending-auth file — which, unbounded and detached, can exhaust a shared
+/// multi-tenant container's `--pids-limit`.
+static ACTIVE_BIND_POLLS: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<PathBuf>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashSet::new()));
+
 /// Poll `bind` in the background so the turn never blocks the ~14-minute human
-/// ceremony. Emits `agent_id.bound` on success when a hub is present.
+/// ceremony. Emits `agent_id.bound` on success when a hub is present. At most
+/// one poll runs per state dir; a call while one is already live is a no-op
+/// (the existing poll will observe the same pending binding).
 fn spawn_bind_poll(sd: PathBuf, hub: Option<SecurePromptHub>) {
+    {
+        let mut active = ACTIVE_BIND_POLLS.lock().expect("bind-poll set poisoned");
+        if !active.insert(sd.clone()) {
+            tracing::debug!("agent-id: bind poll already active for this identity; not stacking");
+            return;
+        }
+    }
     tokio::spawn(async move {
         let result =
             cli::run_interactive(Bin::Core, &sd, &["bind", "--timeout-sec", "840"], None).await;
@@ -232,6 +249,10 @@ fn spawn_bind_poll(sd: PathBuf, hub: Option<SecurePromptHub>) {
             Ok(r) => tracing::info!(result = %r.json, "agent-id: owner binding did not complete"),
             Err(e) => tracing::info!(error = %e, "agent-id: owner binding poll ended"),
         }
+        ACTIVE_BIND_POLLS
+            .lock()
+            .expect("bind-poll set poisoned")
+            .remove(&sd);
     });
 }
 
@@ -397,7 +418,17 @@ fn exec_browser_open<'a>(r: &'a ToolRegistry<'a>, args: &'a Value) -> BoxFuture<
             }
             argv.push("--headed".to_string());
         }
-        let log = std::env::temp_dir().join(format!("agent-browser-{name}.log"));
+        // Keep the daemon log inside this tenant's state dir, not a shared
+        // /tmp path: many tenants run in one process, so a global
+        // `agent-browser-{name}.log` lets one tenant's daemon truncate and
+        // interleave another's diagnostics — and `name` is model-controlled,
+        // so a global path also invites traversal. `sanitize_session_name`
+        // keeps the filename to a safe slug.
+        let log_dir = sd.join("browser-logs");
+        if let Err(error) = std::fs::create_dir_all(&log_dir) {
+            return err(format!("could not create browser log dir: {error}"));
+        }
+        let log = log_dir.join(format!("open-{}.log", sanitize_session_name(&name)));
         match cli::spawn_daemon_ready(
             &sd,
             &argv.iter().map(String::as_str).collect::<Vec<_>>(),
@@ -444,22 +475,10 @@ fn exec_browser_act<'a>(r: &'a ToolRegistry<'a>, args: &'a Value) -> BoxFuture<'
             .and_then(Value::as_object)
             .cloned()
             .unwrap_or_default();
-        if hosted_safe(r) {
-            if action == "upload" {
-                return err("File upload is disabled by the hosted capability policy.");
-            }
-            if matches!(action.as_str(), "navigate" | "tab-new")
-                && let Some(url) = params.get("url").and_then(Value::as_str)
-                && !is_http_url(url)
-            {
-                return err("Hosted browser navigation must use http:// or https://.");
-            }
-            // The plugin's defaults stay inside this tenant's state directory;
-            // an arbitrary path would otherwise become an indirect file-write
-            // capability even though filesystem tools are disabled.
-            if matches!(action.as_str(), "screenshot" | "zoom") {
-                params.remove("path");
-            }
+        if hosted_safe(r)
+            && let Err(message) = enforce_hosted_browser_params(&action, &mut params)
+        {
+            return err(&message);
         }
         let mut argv = vec![action];
         append_flags(&mut argv, &params);
@@ -515,11 +534,69 @@ fn exec_browser_fill_otp<'a>(r: &'a ToolRegistry<'a>, args: &'a Value) -> BoxFut
     })
 }
 
+/// Reduce a model-supplied session name to a filesystem-safe slug for use in a
+/// log filename: alphanumerics, dash, and underscore survive; everything else
+/// (path separators, `..`, dots) becomes `_`. Bounded so a huge name can't
+/// blow past filename limits. The value passed to the daemon as `--name` is
+/// unchanged; this only guards the derived log path.
+fn sanitize_session_name(name: &str) -> String {
+    let slug: String = name
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .take(64)
+        .collect();
+    if slug.is_empty() { "session".to_string() } else { slug }
+}
+
 fn push_opt(argv: &mut Vec<String>, flag: &str, value: Option<String>) {
     if let Some(value) = value {
         argv.push(flag.to_string());
         argv.push(value);
     }
+}
+
+/// Verbs that hand the page arbitrary local files. Blocked wholesale under the
+/// hosted policy — filesystem tools are disabled, so these would be the only
+/// path back to the disk.
+const HOSTED_BLOCKED_BROWSER_ACTIONS: &[&str] = &["upload"];
+
+/// Param keys that name a caller-chosen output/input path. Stripped from EVERY
+/// action under the hosted policy (not just the file-writing verbs known
+/// today), so a plugin that later adds `pdf`/`har`/`record`/`trace`/`download`
+/// with a `--path`/`--output` flag can't become an indirect file-write. When a
+/// verb needs a file (screenshot/zoom), dropping the key falls back to the
+/// plugin's default inside this tenant's state directory.
+const HOSTED_BLOCKED_PATH_KEYS: &[&str] = &["path", "output", "out", "dest", "file", "files", "save"];
+
+/// Param keys carrying a navigation target. Every one must be http(s) under the
+/// hosted policy so no action can reach file://, chrome://, or a custom scheme.
+const HOSTED_URL_KEYS: &[&str] = &["url", "start"];
+
+/// Apply the hosted browser-action policy in place. Generalizes what used to be
+/// a three-verb denylist: block file-handoff verbs, strip output-path flags
+/// from all actions, and require http(s) on any navigation flag. A stricter
+/// verb+flag allowlist owned by the plugin would be the deeper fix; this keeps
+/// the gate from silently failing open as the plugin's verb set grows.
+fn enforce_hosted_browser_params(
+    action: &str,
+    params: &mut serde_json::Map<String, Value>,
+) -> Result<(), String> {
+    if HOSTED_BLOCKED_BROWSER_ACTIONS.contains(&action) {
+        return Err(format!(
+            "The `{action}` browser action is disabled by the hosted capability policy."
+        ));
+    }
+    for key in HOSTED_URL_KEYS {
+        if let Some(url) = params.get(*key).and_then(Value::as_str)
+            && !is_http_url(url)
+        {
+            return Err("Hosted browser navigation must use http:// or https://.".to_string());
+        }
+    }
+    for key in HOSTED_BLOCKED_PATH_KEYS {
+        params.remove(*key);
+    }
+    Ok(())
 }
 
 /// Turn a `params` object into `--key value` flags for the browser CLI. Bools
@@ -747,8 +824,10 @@ pub const TOOL_DEFS: &[ToolDef] = &[
 
 #[cfg(test)]
 mod tests {
-    use super::{is_http_url, note_secret_collected};
-    use serde_json::Value;
+    use super::{
+        enforce_hosted_browser_params, is_http_url, note_secret_collected, sanitize_session_name,
+    };
+    use serde_json::{Value, json};
 
     #[test]
     fn ok_result_gets_a_submission_note() {
@@ -801,5 +880,63 @@ mod tests {
         assert!(!is_http_url("file:///etc/passwd"));
         assert!(!is_http_url("data:text/plain,secret"));
         assert!(!is_http_url("javascript:alert(1)"));
+    }
+
+    fn map(value: Value) -> serde_json::Map<String, Value> {
+        value.as_object().cloned().unwrap()
+    }
+
+    #[test]
+    fn hosted_policy_blocks_file_handoff_verbs() {
+        let mut params = map(json!({"ref": "@e1", "files": "/a.pdf"}));
+        assert!(enforce_hosted_browser_params("upload", &mut params).is_err());
+    }
+
+    #[test]
+    fn hosted_policy_strips_output_paths_from_any_action() {
+        // Not just screenshot/zoom: a future file-writing verb with a path flag
+        // must have it stripped rather than forwarded to the CLI.
+        for action in ["screenshot", "zoom", "pdf", "har", "record", "trace"] {
+            let mut params = map(json!({"path": "/etc/evil", "output": "/tmp/x", "region": "0,0,1,1"}));
+            enforce_hosted_browser_params(action, &mut params).unwrap();
+            assert!(!params.contains_key("path"), "{action} keeps path");
+            assert!(!params.contains_key("output"), "{action} keeps output");
+            // Non-path params survive.
+            assert!(params.contains_key("region"), "{action} dropped region");
+        }
+    }
+
+    #[test]
+    fn hosted_policy_requires_http_on_every_navigation_flag() {
+        for key in ["url", "start"] {
+            let mut params = map(json!({ key: "file:///etc/passwd" }));
+            assert!(
+                enforce_hosted_browser_params("navigate", &mut params).is_err(),
+                "{key} allowed a file scheme"
+            );
+            let mut ok = map(json!({ key: "https://example.com" }));
+            assert!(enforce_hosted_browser_params("navigate", &mut ok).is_ok());
+        }
+    }
+
+    #[test]
+    fn hosted_policy_allows_ordinary_actions() {
+        let mut params = map(json!({"ref": "@e2", "text": "hello"}));
+        enforce_hosted_browser_params("type", &mut params).unwrap();
+        assert_eq!(params.get("ref").and_then(Value::as_str), Some("@e2"));
+        assert_eq!(params.get("text").and_then(Value::as_str), Some("hello"));
+    }
+
+    #[test]
+    fn session_name_sanitizes_traversal_and_bounds_length() {
+        assert_eq!(sanitize_session_name("main"), "main");
+        assert_eq!(sanitize_session_name("work-1_A"), "work-1_A");
+        assert_eq!(sanitize_session_name("../../etc/passwd"), "______etc_passwd");
+        assert_eq!(sanitize_session_name("a/b"), "a_b");
+        assert_eq!(sanitize_session_name(""), "session");
+        assert_eq!(sanitize_session_name(&"x".repeat(200)).len(), 64);
+        // No path separators or parent refs survive.
+        let slug = sanitize_session_name("..\\..\\win");
+        assert!(!slug.contains('/') && !slug.contains('\\') && !slug.contains(".."));
     }
 }
