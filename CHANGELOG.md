@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.23.7 - gpt-5.x on Chat Completions, agent-browser freshness
+
+- **OpenAI reasoning models work again.** gpt-5.x / o-series turns on Chat
+  Completions failed with a 400 on every request: those models require
+  `max_completion_tokens` (classic `max_tokens` is rejected) and accept only
+  the default temperature. The vendored genai fork now detects reasoning-era
+  model names on the direct OpenAI adapter, sends `max_completion_tokens`,
+  and drops non-default `temperature`/`top_p` (the `gpt-5-chat*` variants
+  keep sampling params). Other OpenAI-compatible providers are unaffected.
+- **Stale agent-browser installs get flagged.** Lethe never pinned
+  `agent-browser`, but the CLI is pre-1.0, so npm's caret semantics mean
+  `npm update -g` never moves an old install forward (a February 0.10.0
+  stays 0.10.0 while npm's latest is 0.31.x) — and the old binary survives
+  reinstalls on the host PATH and in the persistent container. `browser_open`
+  now checks the installed version once per process and, when it's below a
+  known-good floor, tells the agent to run
+  `npm install -g agent-browser@latest`.
+
 ## 0.23.6 - Hosted plugins and authoritative Agenda
 
 - **Hosted plugins are discovered and invoked through one trusted bridge.**
