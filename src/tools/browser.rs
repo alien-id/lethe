@@ -14,12 +14,21 @@ use sha2::{Digest, Sha256};
 const AGENT_BROWSER: &str = "agent-browser";
 const DEFAULT_TIMEOUT_SECONDS: u64 = 60;
 
+/// Oldest agent-browser release we consider current enough. There is no pin
+/// anywhere — but `agent-browser` is pre-1.0, so npm's implicit caret range
+/// means `npm update -g` never moves an old install forward (0.10.x stays
+/// 0.10.x forever). Installs from early 2026 therefore linger unless someone
+/// runs an explicit `npm install -g agent-browser@latest`; when we detect one,
+/// `browser_open` tells the agent to do exactly that.
+const MIN_AGENT_BROWSER_VERSION: [u64; 3] = [0, 31, 0];
+
 #[derive(Clone, Debug)]
 pub struct BrowserTools {
     profile_dir: PathBuf,
     session_name: String,
     close_on_drop: bool,
     used: Arc<AtomicBool>,
+    version_hint: Arc<std::sync::OnceLock<Option<String>>>,
 }
 
 #[derive(Debug)]
@@ -50,25 +59,55 @@ impl BrowserTools {
             session_name: format!("lethe-{session_suffix}"),
             close_on_drop,
             used: Arc::new(AtomicBool::new(false)),
+            version_hint: Arc::new(std::sync::OnceLock::new()),
         }
     }
 
     pub fn open(&self, url: &str) -> String {
         let result = self.run_agent_browser(&["open".to_string(), url.to_string()]);
         match result {
-            Ok(output) if output.code == 0 => json!({
-                "status": "OK",
-                "url": url,
-                "message": if output.stdout.trim().is_empty() {
-                    format!("Navigated to {url}")
-                } else {
-                    output.stdout.trim().to_string()
-                },
-            }),
+            Ok(output) if output.code == 0 => {
+                let mut body = json!({
+                    "status": "OK",
+                    "url": url,
+                    "message": if output.stdout.trim().is_empty() {
+                        format!("Navigated to {url}")
+                    } else {
+                        output.stdout.trim().to_string()
+                    },
+                });
+                if let Some(hint) = self.stale_version_hint() {
+                    body["update_hint"] = json!(hint);
+                }
+                body
+            }
             Ok(output) => error_json(output.stderr, output.stdout, "Failed to open URL"),
             Err(error) => json!({"status": "error", "message": error}),
         }
         .to_string()
+    }
+
+    /// A one-per-process staleness nudge, surfaced on `browser_open` so the
+    /// agent upgrades its own environment. Silent on any failure to probe —
+    /// a missing or odd `--version` must never break browsing.
+    fn stale_version_hint(&self) -> Option<String> {
+        self.version_hint
+            .get_or_init(|| {
+                let program = find_executable(AGENT_BROWSER)?;
+                let output =
+                    run_command(&program, &["--version".to_string()], Duration::from_secs(10)).ok()?;
+                let version = parse_cli_version(&output.stdout)?;
+                (version < MIN_AGENT_BROWSER_VERSION).then(|| {
+                    format!(
+                        "agent-browser {} is outdated (expected >= {}). It is pre-1.0, so \
+                         `npm update -g` never picks up new minors — upgrade explicitly with: \
+                         npm install -g agent-browser@latest",
+                        format_version(version),
+                        format_version(MIN_AGENT_BROWSER_VERSION),
+                    )
+                })
+            })
+            .clone()
     }
 
     pub fn snapshot(&self, interactive_only: bool, compact: bool) -> String {
@@ -133,7 +172,7 @@ impl BrowserTools {
         fs::create_dir_all(&self.profile_dir)
             .map_err(|error| format!("Failed to create browser profile directory: {error}"))?;
         let program = find_executable(AGENT_BROWSER).ok_or_else(|| {
-            "agent-browser not found. Install with: npm install -g agent-browser".to_string()
+            "agent-browser not found. Install with: npm install -g agent-browser@latest".to_string()
         })?;
         if args.first().is_none_or(|arg| arg != "close") {
             self.used.store(true, Ordering::Relaxed);
@@ -178,6 +217,27 @@ impl Drop for BrowserTools {
             Duration::from_secs(5),
         );
     }
+}
+
+/// Parse `agent-browser --version` output ("agent-browser 0.31.1" or a bare
+/// "0.31.1") into a comparable triple.
+fn parse_cli_version(output: &str) -> Option<[u64; 3]> {
+    let token = output.lines().next()?.split_whitespace().last()?;
+    let mut parts = token.split('.').map(|p| {
+        p.chars()
+            .take_while(char::is_ascii_digit)
+            .collect::<String>()
+            .parse::<u64>()
+            .ok()
+    });
+    let major = parts.next().flatten()?;
+    let minor = parts.next().flatten()?;
+    let patch = parts.next().flatten().unwrap_or(0);
+    Some([major, minor, patch])
+}
+
+fn format_version(version: [u64; 3]) -> String {
+    format!("{}.{}.{}", version[0], version[1], version[2])
 }
 
 fn error_json(stderr: String, stdout: String, fallback: &str) -> serde_json::Value {
@@ -402,6 +462,22 @@ mod tests {
         assert_ne!(first.session_name, second.session_name);
         assert!(first.close_on_drop);
         assert!(second.close_on_drop);
+    }
+
+    #[test]
+    fn cli_version_parses_prefixed_bare_and_partial_forms() {
+        assert_eq!(parse_cli_version("agent-browser 0.10.0"), Some([0, 10, 0]));
+        assert_eq!(parse_cli_version("0.31.1"), Some([0, 31, 1]));
+        assert_eq!(parse_cli_version("agent-browser 1.2"), Some([1, 2, 0]));
+        assert_eq!(parse_cli_version("agent-browser 0.31.1-beta.2\n"), Some([0, 31, 1]));
+        assert_eq!(parse_cli_version(""), None);
+        assert_eq!(parse_cli_version("not a version"), None);
+    }
+
+    #[test]
+    fn version_floor_flags_the_february_era_installs() {
+        assert!(parse_cli_version("agent-browser 0.10.0").unwrap() < MIN_AGENT_BROWSER_VERSION);
+        assert!(parse_cli_version("agent-browser 0.31.1").unwrap() >= MIN_AGENT_BROWSER_VERSION);
     }
 
     #[test]
