@@ -431,6 +431,7 @@ pub fn router(state: ApiState) -> Router {
         .route("/configure", post(configure))
         .route("/model", get(model_get).post(model_post))
         .route("/events", get(events))
+        .route("/browser/stream", get(browser_stream))
         .route("/file", get(serve_file))
         .route("/actors", get(list_actors))
         .route("/todos", get(list_todos))
@@ -1019,6 +1020,26 @@ fn serialize_message(message: StoredMessage) -> Value {
         "created_at": message.created_at,
         "metadata": message.metadata,
     })
+}
+
+#[derive(Debug, Deserialize)]
+struct BrowserStreamQuery {
+    source: Option<String>,
+}
+
+// Live browser viewport relay (see interfaces::browser_stream). WS because
+// frames + input events flow both ways; the control plane relays it onward to
+// the owner's web client.
+async fn browser_stream(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Query(query): Query<BrowserStreamQuery>,
+    ws: axum::extract::ws::WebSocketUpgrade,
+) -> Response {
+    if let Some(response) = require_auth(&state, &headers) {
+        return response;
+    }
+    ws.on_upgrade(move |socket| crate::interfaces::browser_stream::relay(socket, query.source))
 }
 
 #[derive(Debug, Deserialize)]
