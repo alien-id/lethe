@@ -237,6 +237,14 @@ impl MessageHistory {
         }
 
         let mut messages = merged.into_values().collect::<Vec<_>>();
+        // Blend a bounded recency prior into the score so low-signal queries
+        // don't bury the last few turns under older high-similarity matches.
+        // A genuinely strong old match can still outrank recent chatter because
+        // the bonus is capped at RECENCY_WEIGHT.
+        let now = Utc::now();
+        for message in messages.iter_mut() {
+            message.score += recency_bonus(&message.created_at, now);
+        }
         messages.sort_by(compare_messages);
         messages.truncate(limit);
         Ok(messages)
@@ -531,6 +539,28 @@ fn compare_messages(left: &StoredMessage, right: &StoredMessage) -> Ordering {
         .then_with(|| left.id.cmp(&right.id))
 }
 
+/// Maximum recency bonus added to a message's score. Chosen so a recent message
+/// is preferred on low-signal / tied queries, but a strongly-matching older
+/// message (score >> this) still surfaces.
+const RECENCY_WEIGHT: f64 = 1.0;
+/// Age (hours) at which the recency bonus decays to half. ~24h keeps "what did
+/// he just ask" (minutes-to-hours old) near full weight while month-old threads
+/// get essentially none.
+const RECENCY_HALF_LIFE_HOURS: f64 = 24.0;
+
+/// Bounded exponential recency prior: RECENCY_WEIGHT at age 0, halving every
+/// RECENCY_HALF_LIFE_HOURS. Returns 0.0 for unparseable timestamps (no-op).
+fn recency_bonus(created_at: &str, now: DateTime<Utc>) -> f64 {
+    let Some(created) = parse_time(created_at) else {
+        return 0.0;
+    };
+    let age_hours = (now - created).num_seconds() as f64 / 3600.0;
+    if age_hours <= 0.0 {
+        return RECENCY_WEIGHT;
+    }
+    RECENCY_WEIGHT * (-age_hours * std::f64::consts::LN_2 / RECENCY_HALF_LIFE_HOURS).exp()
+}
+
 fn parse_time(value: &str) -> Option<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(value)
         .ok()
@@ -662,5 +692,50 @@ mod tests {
 
         let window = history.get_context_window(3, 10).unwrap();
         assert!(window.is_empty() || window.last().unwrap().content.len() <= 10);
+    }
+
+    #[test]
+    fn recency_bonus_decays_and_is_bounded() {
+        let now = Utc::now();
+        // Age 0 -> full weight.
+        let fresh = recency_bonus(&now.to_rfc3339(), now);
+        assert!((fresh - RECENCY_WEIGHT).abs() < 1e-9);
+        // One half-life -> ~half.
+        let half = recency_bonus(
+            &(now - chrono::Duration::hours(RECENCY_HALF_LIFE_HOURS as i64)).to_rfc3339(),
+            now,
+        );
+        assert!((half - RECENCY_WEIGHT / 2.0).abs() < 0.02);
+        // Month-old -> negligible (won't override a real match).
+        let old = recency_bonus(&(now - chrono::Duration::days(30)).to_rfc3339(), now);
+        assert!(old < 0.01);
+        // Unparseable -> no-op (0.0), never panics.
+        assert_eq!(recency_bonus("not-a-date", now), 0.0);
+    }
+
+    #[test]
+    fn recency_prior_surfaces_recent_turn_on_low_signal_query() {
+        // Regression for the 2026-07-14 "yes, pull" failure: a low-signal query
+        // must surface the most recent turn, not an older high-scoring one.
+        let (_tmp, history) = history();
+        // Older message that lexically matches the query term.
+        history
+            .add(MessageRole::User, "pull the Deel statement from the portal", None)
+            .unwrap();
+        // A pile of unrelated turns in between (simulate window roll).
+        for i in 0..5 {
+            history
+                .add(MessageRole::Assistant, &format!("unrelated turn {i}"), None)
+                .unwrap();
+        }
+        // The most recent turn — what "yes, pull" actually referred to.
+        let recent_id = history
+            .add(MessageRole::User, "yes, pull today's run data", None)
+            .unwrap();
+
+        // conversation_recent path: strict recency, newest last.
+        let recent = history.get_recent(3).unwrap();
+        assert_eq!(recent.last().unwrap().id, recent_id);
+        assert!(recent.last().unwrap().content.contains("run data"));
     }
 }

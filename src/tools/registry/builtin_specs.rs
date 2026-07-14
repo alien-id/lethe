@@ -144,6 +144,18 @@ fn exec_conversation_search(registry: &ToolRegistry<'_>, args: &Value) -> String
     }
 }
 
+fn exec_conversation_recent(registry: &ToolRegistry<'_>, args: &Value) -> String {
+    use crate::memory::messages::MessageRole;
+    let role_filter = nonempty_string(args, "role").map(|value| MessageRole::parse(&value));
+    match registry
+        .memory
+        .recent_messages(usize_arg(args, "limit", 15), role_filter.as_ref())
+    {
+        Ok(messages) => crate::memory::messages::MessageHistory::format_messages(&messages),
+        Err(error) => format!("Error: {error}"),
+    }
+}
+
 fn exec_conversation_get(registry: &ToolRegistry<'_>, args: &Value) -> String {
     let id = string_arg(args, "message_id");
     if id.trim().is_empty() {
@@ -402,6 +414,29 @@ pub const TOOL_DEFS: &[ToolDef] = &[
         ],
         category: ToolCategory::Requestable,
         execute: ToolExecutor::Sync(exec_conversation_search),
+    },
+    ToolDef {
+        name: "conversation_recent",
+        description: "Return the last N conversation messages strictly by recency (newest last), with NO similarity ranking. Use this to recover recent context that has rolled out of the working-memory window (e.g. 'what did he just ask'), instead of conversation_search, which can bury recent turns under older high-similarity matches.",
+        params: &[
+            p_int("limit", "How many recent messages (default 10)."),
+            p_str("role", "Optional role filter (user/assistant)."),
+        ],
+        category: ToolCategory::Requestable,
+        execute: ToolExecutor::Sync(exec_conversation_recent),
+    },
+    ToolDef {
+        name: "conversation_recent",
+        description: "Fetch the most recent conversation turns in order (newest last), \
+by recency only — no similarity ranking. Use this to recover 'what did they just \
+ask / what were the last few turns' when working memory has rolled past it. \
+Prefer over conversation_search for recency; use conversation_search for topical recall.",
+        params: &[
+            p_int("limit", "How many recent messages (default 15)."),
+            p_str("role", "Optional role filter (user/assistant)."),
+        ],
+        category: ToolCategory::Requestable,
+        execute: ToolExecutor::Sync(exec_conversation_recent),
     },
     ToolDef {
         name: "conversation_get",

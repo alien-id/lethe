@@ -225,6 +225,26 @@ impl MemoryStore {
             .map_err(Into::into)
     }
 
+    /// Return the most recent messages strictly by recency (newest last, in
+    /// storage order), with NO similarity scoring. This is the deterministic
+    /// "what did he just ask" path — use it to recover recent context that has
+    /// rolled out of the working-memory window, rather than semantic search
+    /// (which can bury recent turns under older high-similarity matches).
+    pub fn recent_messages(
+        &self,
+        limit: usize,
+        role: Option<&MessageRole>,
+    ) -> MemoryStoreResult<Vec<StoredMessage>> {
+        let messages = self.messages.get_recent(normalized_limit(limit, 20))?;
+        Ok(match role {
+            Some(role) => messages
+                .into_iter()
+                .filter(|message| &message.role == role)
+                .collect(),
+            None => messages,
+        })
+    }
+
     pub fn search_notes(
         &self,
         query: &str,

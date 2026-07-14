@@ -51,6 +51,7 @@ const FREE_TOOL_NAMES: &[&str] = &[
     "archival_search",
     "archival_insert",
     "conversation_search",
+    "conversation_recent",
     "note_search",
     "note_get",
     // Chat egress (Telegram-branded + the client-transport alias)
@@ -77,7 +78,7 @@ const FREE_TOOL_NAMES: &[&str] = &[
 /// Tools whose results we skip recording in the per-turn tool log
 /// (search results are recursive bloat). Matches Python's
 /// `SEARCH_RESULT_SKIP_TOOL_NAMES`.
-const SKIP_TOOL_LOG_TOOLS: &[&str] = &["conversation_search", "archival_search"];
+const SKIP_TOOL_LOG_TOOLS: &[&str] = &["conversation_search", "conversation_recent", "archival_search"];
 
 fn is_free_tool(name: &str) -> bool {
     FREE_TOOL_NAMES.contains(&name)
