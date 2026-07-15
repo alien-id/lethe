@@ -247,8 +247,13 @@ fn hosted_safe_policy_exposes_memory_but_blocks_local_execution() {
     assert!(ToolPolicy::HostedSafe.allows_builtin("agent_id_status"));
     assert!(ToolPolicy::HostedSafe.allows_builtin("vault_list"));
     assert!(ToolPolicy::HostedSafe.allows_builtin("alien_browser_open"));
-    assert!(!ToolPolicy::HostedSafe.allows_builtin("read_file"));
+    // Workspace file tools are hosted capabilities (jailed instances are
+    // constructed by with_runtime); shell/PTY/web stay out.
+    assert!(ToolPolicy::HostedSafe.allows_builtin("read_file"));
+    assert!(ToolPolicy::HostedSafe.allows_builtin("write_file"));
+    assert!(ToolPolicy::HostedSafe.allows_builtin("view_image"));
     assert!(!ToolPolicy::HostedSafe.allows_builtin("bash"));
+    assert!(!ToolPolicy::HostedSafe.allows_builtin("web_search"));
     // The built-in browser is NOT a hosted capability — only the vault-sealed
     // `alien_browser_*` is. It must not resurface under the hosted policy.
     assert!(!ToolPolicy::HostedSafe.allows_builtin("browser_open"));
@@ -273,11 +278,11 @@ fn hosted_safe_policy_exposes_memory_but_blocks_local_execution() {
         .collect::<std::collections::HashSet<_>>();
     assert!(names.contains("memory_read"));
     assert!(names.contains("memory_update"));
+    assert!(names.contains("read_file"));
     // The built-in browser is not a hosted capability — hidden and unavailable
     // under the hosted policy (hosted browsing is only the vault-sealed browser).
     assert!(!names.contains("browser_open"));
     assert!(!names.contains("bash"));
-    assert!(!names.contains("read_file"));
     assert!(!registry.tool_is_available("bash"));
     assert!(!registry.tool_is_available("browser_open"));
     assert!(
@@ -290,6 +295,81 @@ fn hosted_safe_policy_exposes_memory_but_blocks_local_execution() {
             .execute("browser_open", &json!({"url": "https://example.com"}))
             .contains("disabled by the active capability policy")
     );
+}
+
+#[test]
+fn hosted_safe_file_tools_are_jailed_to_the_workspace() {
+    let (_tmp, memory, shell) = registry();
+    let workspace = memory.workspace_dir().to_path_buf();
+    let registry = ToolRegistry::with_runtime(
+        &memory,
+        &workspace,
+        "/tmp/lethe-cache",
+        &shell,
+        ToolRuntime {
+            policy: ToolPolicy::HostedSafe,
+            ..ToolRuntime::default()
+        },
+    );
+
+    // Inside the workspace: relative and workspace-absolute paths both work.
+    let write = registry.execute(
+        "write_file",
+        &json!({"file_path": "notes/inside.txt", "content": "hello"}),
+    );
+    assert!(write.contains("Successfully"), "write failed: {write}");
+    let absolute_inside = workspace.join("notes/inside.txt");
+    let read = registry.execute(
+        "read_file",
+        &json!({"file_path": absolute_inside.to_str().unwrap()}),
+    );
+    assert_eq!(read, "hello");
+
+    // Escapes are rejected: absolute outside, `..` traversal, tilde.
+    for path in [
+        "/etc/hosts",
+        "../outside.txt",
+        "nested/../../outside.txt",
+        "~/outside.txt",
+    ] {
+        let denied = registry.execute("read_file", &json!({"file_path": path}));
+        assert!(
+            denied.contains("Access denied") || denied.contains("outside the workspace"),
+            "path {path} was not denied: {denied}"
+        );
+        let denied = registry.execute("write_file", &json!({"file_path": path, "content": "nope"}));
+        assert!(
+            denied.contains("Access denied") || denied.contains("outside the workspace"),
+            "write to {path} was not denied: {denied}"
+        );
+    }
+    let denied = registry.execute("list_directory", &json!({"path": "/"}));
+    assert!(denied.contains("Access denied") || denied.contains("outside the workspace"));
+    let denied = registry.execute("view_image", &json!({"file_path": "/etc/hosts"}));
+    assert!(denied.contains("Access denied") || denied.contains("outside the workspace"));
+
+    // A symlink pointing out of the workspace must not be followable.
+    #[cfg(unix)]
+    {
+        let link = workspace.join("escape-link");
+        let _ = std::os::unix::fs::symlink("/etc", &link);
+        let denied = registry.execute("read_file", &json!({"file_path": "escape-link/hosts"}));
+        assert!(
+            denied.contains("Access denied") || denied.contains("outside the workspace"),
+            "symlink escape was not denied: {denied}"
+        );
+    }
+
+    // The full policy keeps unrestricted access (standalone behavior).
+    let full = ToolRegistry::with_runtime(
+        &memory,
+        &workspace,
+        "/tmp/lethe-cache",
+        &shell,
+        ToolRuntime::default(),
+    );
+    let read = full.execute("read_file", &json!({"file_path": "/etc/hosts"}));
+    assert!(!read.contains("Access denied"));
 }
 
 #[test]
@@ -316,7 +396,7 @@ fn hosted_safe_policy_allows_subagent_orchestration() {
     }
     // The category lookup must not accidentally admit non-actor tools that
     // share no hosted prefix.
-    assert!(!ToolPolicy::HostedSafe.allows_builtin("write_file"));
+    assert!(!ToolPolicy::HostedSafe.allows_builtin("bash"));
     assert!(!ToolPolicy::HostedSafe.allows_builtin("web_search"));
 
     // With an actor context attached under the hosted policy, orchestration is

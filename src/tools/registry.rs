@@ -64,6 +64,20 @@ impl ToolPolicy {
                     || name.starts_with("agent_id_")
                     || name.starts_with("vault_")
                     || name.starts_with("alien_browser_")
+                    // Workspace file access. Admissible only because
+                    // `ToolRegistry::with_runtime` constructs the jailed
+                    // (sandboxed) FileTools/ImageTools under this policy, so
+                    // every path is confined to the tenant workspace.
+                    || matches!(
+                        name,
+                        "read_file"
+                            | "write_file"
+                            | "edit_file"
+                            | "list_directory"
+                            | "glob_search"
+                            | "grep_search"
+                            | "view_image"
+                    )
                     // Subagent orchestration (spawn/message/terminate/...) is
                     // allowed: these tools only manage internal LLM workers and
                     // never touch host resources directly. Every subagent turn
@@ -164,15 +178,30 @@ impl<'a> ToolRegistry<'a> {
     ) -> Self {
         let workspace_dir = workspace_dir.into();
         let cache_dir = cache_dir.into();
-        let browser = if runtime.policy == ToolPolicy::HostedSafe {
+        let hosted = runtime.policy == ToolPolicy::HostedSafe;
+        let browser = if hosted {
             BrowserTools::hosted(cache_dir.clone())
         } else {
             BrowserTools::new(cache_dir.clone())
         };
+        // Under the hosted policy the file/image tools are jailed to the
+        // (tenant-private) workspace; the allowlist below admits them only
+        // because this constructor guarantees the jailed instances.
+        let (files, image) = if hosted {
+            (
+                FileTools::sandboxed(workspace_dir.clone()),
+                ImageTools::sandboxed(workspace_dir),
+            )
+        } else {
+            (
+                FileTools::new(workspace_dir.clone()),
+                ImageTools::new(workspace_dir),
+            )
+        };
         Self {
             memory,
-            files: FileTools::new(workspace_dir.clone()),
-            image: ImageTools::new(workspace_dir),
+            files,
+            image,
             shell,
             web: WebTools::new(cache_dir.clone()),
             browser,

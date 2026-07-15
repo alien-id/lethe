@@ -8,17 +8,31 @@ const MAX_IMAGE_BASE64_BYTES: usize = 5_000_000;
 #[derive(Clone, Debug)]
 pub struct ImageTools {
     workspace_dir: PathBuf,
+    /// Hosted jail: when set, images may only be read from inside the
+    /// workspace (same rules as the sandboxed file tools).
+    sandboxed: bool,
 }
 
 impl ImageTools {
     pub fn new(workspace_dir: impl Into<PathBuf>) -> Self {
         Self {
             workspace_dir: workspace_dir.into(),
+            sandboxed: false,
+        }
+    }
+
+    pub fn sandboxed(workspace_dir: impl Into<PathBuf>) -> Self {
+        Self {
+            workspace_dir: workspace_dir.into(),
+            sandboxed: true,
         }
     }
 
     pub fn view_image(&self, file_path: &str, _max_size: usize) -> String {
-        let path = self.resolve_path(file_path);
+        let path = match self.resolve_path(file_path) {
+            Ok(path) => path,
+            Err(error) => return error_json(&error),
+        };
         if !path.exists() {
             return error_json(&format!("File not found: {file_path}"));
         }
@@ -62,13 +76,16 @@ impl ImageTools {
         .to_string()
     }
 
-    fn resolve_path(&self, file_path: &str) -> PathBuf {
+    fn resolve_path(&self, file_path: &str) -> Result<PathBuf, String> {
+        if self.sandboxed {
+            return crate::tools::filesystem::resolve_jailed_path(file_path, &self.workspace_dir);
+        }
         let path = PathBuf::from(file_path);
-        if path.is_absolute() {
+        Ok(if path.is_absolute() {
             path
         } else {
             self.workspace_dir.join(path)
-        }
+        })
     }
 }
 

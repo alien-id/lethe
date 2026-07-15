@@ -1,6 +1,16 @@
 # Changelog
 
-## Unreleased - hosted subagents/DMN, host-driven brainstem beats
+## Unreleased - hosted subagents/DMN, host-driven brainstem beats, jailed file tools
+
+- **Workspace-jailed file/image tools under the hosted policy.**
+  `FileTools::sandboxed` / `ImageTools::sandboxed` confine every path —
+  absolute, relative, `~`, `..`, or through a symlink — to the workspace
+  directory, checked on the canonicalized form against the real filesystem
+  (non-existent write targets resolve their longest existing prefix).
+  `ToolRegistry::with_runtime` constructs the jailed instances under
+  `ToolPolicy::HostedSafe`, and the policy now allowlists `read_file`,
+  `write_file`, `edit_file`, `list_directory`, `glob_search`, `grep_search`,
+  and `view_image`. Standalone (`Full` policy) keeps unrestricted access.
 
 - **Subagent orchestration works under the hosted-safe policy.** The actor
   tools (`spawn_actor`, `spawn_chain`, `send_message`, `terminate`, …) are now

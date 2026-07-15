@@ -19,12 +19,26 @@ const MAX_GREP_MATCHES: usize = 200;
 #[derive(Clone, Debug)]
 pub struct FileTools {
     workspace_dir: PathBuf,
+    /// Hosted jail: when set, every path must resolve (symlinks included)
+    /// inside `workspace_dir`. Standalone keeps full-machine access.
+    sandboxed: bool,
 }
 
 impl FileTools {
     pub fn new(workspace_dir: impl Into<PathBuf>) -> Self {
         Self {
             workspace_dir: workspace_dir.into(),
+            sandboxed: false,
+        }
+    }
+
+    /// Workspace-jailed file tools for hosted multiplexers: absolute paths are
+    /// allowed only inside the workspace, `..`/tilde/symlink escapes are
+    /// rejected after resolution against the real filesystem.
+    pub fn sandboxed(workspace_dir: impl Into<PathBuf>) -> Self {
+        Self {
+            workspace_dir: workspace_dir.into(),
+            sandboxed: true,
         }
     }
 
@@ -106,7 +120,7 @@ impl FileTools {
     }
 
     pub fn list_directory(&self, path: &str, show_hidden: bool) -> String {
-        let dir_path = match resolve_workspace_path(path, &self.workspace_dir) {
+        let dir_path = match self.resolve_path(path) {
             Ok(path) => path,
             Err(error) => return format!("Error listing directory: {error}"),
         };
@@ -158,7 +172,7 @@ impl FileTools {
     }
 
     pub fn glob_search(&self, pattern: &str, path: &str) -> String {
-        let base_path = match resolve_workspace_path(path, &self.workspace_dir) {
+        let base_path = match self.resolve_path(path) {
             Ok(path) => path,
             Err(error) => return format!("Error in glob search: {error}"),
         };
@@ -221,7 +235,7 @@ impl FileTools {
     }
 
     pub fn grep_search(&self, pattern: &str, path: &str, file_pattern: &str) -> String {
-        let base_path = match resolve_workspace_path(path, &self.workspace_dir) {
+        let base_path = match self.resolve_path(path) {
             Ok(path) => path,
             Err(error) => return format!("Error in grep search: {error}"),
         };
@@ -366,8 +380,60 @@ impl FileTools {
     }
 
     fn resolve_path(&self, raw_path: &str) -> Result<PathBuf, String> {
+        if self.sandboxed {
+            return resolve_jailed_path(raw_path, &self.workspace_dir);
+        }
         resolve_workspace_path(raw_path, &self.workspace_dir)
     }
+}
+
+/// Resolve a path and require it to land inside `workspace_dir` after every
+/// indirection is unwound: `..` and symlinks via canonicalization of the
+/// longest existing prefix, tilde expansion via the normal resolver. Used by
+/// the hosted-jailed tool constructors; error strings are model-facing.
+pub(crate) fn resolve_jailed_path(raw_path: &str, workspace_dir: &Path) -> Result<PathBuf, String> {
+    let root = workspace_dir
+        .canonicalize()
+        .map_err(|error| format!("workspace unavailable: {error}"))?;
+    let resolved = resolve_workspace_path(raw_path, workspace_dir)?;
+    // `resolve_workspace_path` canonicalizes existing paths, but a
+    // not-yet-existing target (write_file into a new subtree) keeps its
+    // non-existent suffix verbatim. Canonicalize the longest existing
+    // ancestor so a symlinked or `..`-laden prefix cannot smuggle the
+    // final path outside the jail, then re-attach the pending suffix.
+    let checked = canonicalize_existing_prefix(&resolved)?;
+    if checked.starts_with(&root) {
+        Ok(resolved)
+    } else {
+        Err(format!(
+            "Access denied: {raw_path} resolves outside the workspace"
+        ))
+    }
+}
+
+/// Canonicalize the longest existing prefix of `path` and append the
+/// remaining (not yet existing) components verbatim. Rejects `..` inside a
+/// non-existent suffix — there is nothing on disk to resolve it against.
+fn canonicalize_existing_prefix(path: &Path) -> Result<PathBuf, String> {
+    let mut existing = path.to_path_buf();
+    let mut pending = Vec::new();
+    while !existing.exists() {
+        match existing.file_name() {
+            Some(name) => pending.push(name.to_os_string()),
+            None => {
+                return Err(format!("Access denied: cannot resolve {}", path.display()));
+            }
+        }
+        let Some(parent) = existing.parent() else {
+            return Err(format!("Access denied: cannot resolve {}", path.display()));
+        };
+        existing = parent.to_path_buf();
+    }
+    let mut base = existing.canonicalize().map_err(|error| error.to_string())?;
+    for name in pending.iter().rev() {
+        base.push(name);
+    }
+    Ok(base)
 }
 
 fn resolve_workspace_path(raw_path: &str, workspace_dir: &Path) -> Result<PathBuf, String> {
