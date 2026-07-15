@@ -22,7 +22,9 @@ mod payload;
 mod telegram_specs;
 
 pub use egress::MessageEgress;
-pub use observer::{BoxToolFuture, SharedTurnObserver, TurnObserver};
+pub use observer::{
+    BoxToolFuture, SharedTurnObserver, SubagentObserverFactory, SubagentObserverSlot, TurnObserver,
+};
 
 pub use catalog::find_def;
 pub use client::{ClientToolContext, ClientToolEvent};

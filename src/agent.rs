@@ -168,6 +168,11 @@ pub struct Agent {
     /// that way and lost context silently).
     pending_summary: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
     hosted_plugins: Option<Arc<HostedPluginClient>>,
+    /// Host-installed factory producing a per-turn observer for subagent
+    /// turns (see [`Agent::install_subagent_observer`]). Captured by the
+    /// actor turn executor at build time; `None` leaves subagent turns
+    /// unobserved.
+    subagent_observer: crate::tools::registry::SubagentObserverSlot,
 }
 
 /// How long the next turn waits for the previous turn's summary update before
@@ -234,6 +239,8 @@ impl Agent {
         let shell = ShellTools::new(&settings.paths.workspace_dir);
         let last_prompt_tokens = Arc::new(AtomicU64::new(0));
         let hosted_plugins = HostedPluginClient::from_config(&settings.hosted_plugins);
+        let subagent_observer: crate::tools::registry::SubagentObserverSlot =
+            Arc::new(std::sync::RwLock::new(None));
         let (actor_registry, principal_actor_id) = if settings.background.actors_enabled {
             let mut registry = ActorRegistry::new();
             registry.set_prompts(prompts.clone());
@@ -264,6 +271,7 @@ impl Agent {
                     last_prompt_tokens.clone(),
                     hosted_plugins.clone(),
                     tool_policy,
+                    subagent_observer.clone(),
                 ))
                 .map_err(|error| AgentError::Llm(anyhow!("actor runtime failed: {error}")))?;
             (Some(runtime), Some(principal_id))
@@ -284,6 +292,7 @@ impl Agent {
             conversation_tx: broadcast::channel(CONVERSATION_EVENT_DEPTH).0,
             pending_summary: tokio::sync::Mutex::new(None),
             hosted_plugins,
+            subagent_observer,
         })
     }
 
@@ -552,6 +561,22 @@ impl Agent {
 
     pub fn principal_actor_id(&self) -> Option<&str> {
         self.principal_actor_id.as_deref()
+    }
+
+    /// Install a factory that observes subagent turns. The actor turn
+    /// executor calls it with the acting actor's id at the start of each
+    /// subagent turn and threads the returned observer through the tool
+    /// loop, so hosts can surface per-subagent tool/reasoning activity
+    /// (attributed by actor id) on their own event streams. Applies to all
+    /// turns started after installation; without it subagent turns run
+    /// unobserved.
+    pub fn install_subagent_observer(
+        &self,
+        factory: crate::tools::registry::SubagentObserverFactory,
+    ) {
+        if let Ok(mut slot) = self.subagent_observer.write() {
+            *slot = Some(factory);
+        }
     }
 
     pub async fn run_curator_pass(&self, force: bool) -> AgentResult<CuratorRunStats> {

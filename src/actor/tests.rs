@@ -73,6 +73,20 @@ fn registry_with_principal_and_worker() -> (ActorRegistry, String, String) {
 }
 
 #[test]
+fn spawn_event_carries_the_actor_goals() {
+    let (registry, _principal, worker) = registry_with_principal_and_worker();
+    let events = registry
+        .events
+        .query(Some("actor_spawned"), Some(&worker), None, 1);
+    assert_eq!(events.len(), 1);
+    assert_eq!(
+        events[0].payload["goals"],
+        "Research the topic and report findings"
+    );
+    assert_eq!(events[0].payload["name"], "researcher");
+}
+
+#[test]
 fn open_work_lines_surface_unfinished_subagents_only() {
     let (mut registry, principal, worker) = registry_with_principal_and_worker();
 

@@ -352,6 +352,7 @@ pub(super) fn actor_turn_executor(
     last_prompt_tokens: Arc<AtomicU64>,
     hosted_plugins: Option<Arc<crate::tools::hosted_plugins::HostedPluginClient>>,
     tool_policy: crate::tools::registry::ToolPolicy,
+    subagent_observer: crate::tools::registry::SubagentObserverSlot,
 ) -> ActorTurnExecutor {
     let context = TurnExecutionContext {
         settings,
@@ -363,6 +364,13 @@ pub(super) fn actor_turn_executor(
     };
     Arc::new(move |spec: ActorRunSpec, runtime: ActorRuntime| {
         let context = context.clone();
+        // Resolve the host's observer factory (if any) per turn, so a factory
+        // installed after startup covers turns already in flight next cycle.
+        let observer = subagent_observer
+            .read()
+            .ok()
+            .and_then(|slot| slot.clone())
+            .map(|factory| factory(&spec.actor_id));
         Box::pin(async move {
             let tool_runtime = ToolRuntime {
                 actor: Some(ActorToolContext {
@@ -372,6 +380,7 @@ pub(super) fn actor_turn_executor(
                 }),
                 requested_tools: spec.requested_tools.clone(),
                 policy: tool_policy,
+                observer,
                 ..ToolRuntime::default()
             };
             let mut system_prompt = spec.system_prompt.clone();

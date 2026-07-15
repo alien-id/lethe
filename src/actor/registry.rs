@@ -96,6 +96,7 @@ impl ActorRegistry {
             &actor,
             json!({
                 "name": actor.config.name,
+                "goals": actor.config.goals,
                 "spawned_by": actor.spawned_by,
                 "is_principal": is_principal,
             }),

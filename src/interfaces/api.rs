@@ -401,6 +401,7 @@ fn actor_event_to_api(event: &ActorEvent) -> Option<ApiEvent> {
             "actor.state",
             json!({
                 "actor_id": event.actor_id,
+                "group": event.group,
                 "kind": event.event_type,
                 "payload": payload,
             }),
@@ -409,6 +410,7 @@ fn actor_event_to_api(event: &ActorEvent) -> Option<ApiEvent> {
             "actor.task",
             json!({
                 "actor_id": event.actor_id,
+                "group": event.group,
                 "payload": payload,
             }),
         )),
@@ -416,6 +418,19 @@ fn actor_event_to_api(event: &ActorEvent) -> Option<ApiEvent> {
             "actor.message",
             json!({
                 "actor_id": event.actor_id,
+                "group": event.group,
+                "payload": payload,
+            }),
+        )),
+        // A worker (or the DMN) addressed the user directly. The payload
+        // carries the full message (not just a preview) plus the message
+        // intent under `kind`, so clients can render it as a user-facing
+        // question/notice from that subagent.
+        "user_notify" => Some(ApiEvent::new(
+            "actor.user_notify",
+            json!({
+                "actor_id": event.actor_id,
+                "group": event.group,
                 "payload": payload,
             }),
         )),
@@ -1161,6 +1176,32 @@ mod tests {
         settings.llm.llm_model = "openai/gpt-5".to_string();
         settings.llm.llm_model_aux = "openai/gpt-5-mini".to_string();
         settings
+    }
+
+    #[test]
+    fn actor_events_carry_group_and_surface_user_notify() {
+        let mut event = ActorEvent::new("task_state_changed", "worker-1");
+        event.group = "default".to_string();
+        let api_event = actor_event_to_api(&event).unwrap();
+        assert_eq!(api_event.event, "actor.task");
+        assert_eq!(api_event.data["group"], "default");
+
+        let mut notify = ActorEvent::new("user_notify", "worker-1");
+        notify.group = "default".to_string();
+        notify.payload = serde_json::json!({
+            "message": "Need your input on the draft.",
+            "kind": "user_notify",
+        })
+        .as_object()
+        .cloned()
+        .unwrap();
+        let api_event = actor_event_to_api(&notify).unwrap();
+        assert_eq!(api_event.event, "actor.user_notify");
+        assert_eq!(api_event.data["actor_id"], "worker-1");
+        assert_eq!(
+            api_event.data["payload"]["message"],
+            "Need your input on the draft."
+        );
     }
 
     #[test]

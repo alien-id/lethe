@@ -37,3 +37,16 @@ pub trait TurnObserver: Send + Sync {
 
 /// Convenience alias used inside `ToolRuntime`.
 pub type SharedTurnObserver = Arc<dyn TurnObserver>;
+
+/// Factory producing a per-turn observer for a subagent turn. A host installs
+/// one via [`crate::agent::Agent::install_subagent_observer`]; the actor turn
+/// executor calls it with the acting actor's id at the start of every
+/// subagent turn, so the host can attribute the resulting tool/reasoning
+/// events to that actor. Without an installed factory subagent turns run
+/// unobserved, exactly as before.
+pub type SubagentObserverFactory = Arc<dyn Fn(&str) -> SharedTurnObserver + Send + Sync>;
+
+/// Shared slot holding the optional [`SubagentObserverFactory`]. Created at
+/// agent build time and captured by the actor turn executor, so a factory
+/// installed after startup applies to every subsequent subagent turn.
+pub type SubagentObserverSlot = Arc<std::sync::RwLock<Option<SubagentObserverFactory>>>;
