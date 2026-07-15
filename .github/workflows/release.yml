@@ -30,18 +30,25 @@ jobs:
           # `__isoc23_strtol*` symbols introduced in glibc 2.39. End-user
           # floor: Ubuntu 24.04+, Debian 13+, Fedora 40+, RHEL/Rocky 10+.
           # macOS binaries link only system libs and stay portable per arch.
+          # The only native build dependency is the mold linker (required by
+          # .cargo/config.toml on Linux). It is fetched as a static binary
+          # from its GitHub releases instead of apt: the arm64 runners pull
+          # from ports.ubuntu.com, whose outages have broken this workflow,
+          # while GitHub-to-GitHub downloads share the runner's own
+          # infrastructure. protobuf was a leftover — nothing in Cargo.lock
+          # uses protoc since the LanceDB migrator moved to its own workflow.
           - name: linux-x86_64
             runner: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
-            deps: sudo apt-get update && sudo apt-get install -y protobuf-compiler libprotobuf-dev pkg-config mold
+            deps: curl -fsSL https://github.com/rui314/mold/releases/download/v2.41.0/mold-2.41.0-x86_64-linux.tar.gz | sudo tar -xz --strip-components=1 -C /usr/local
           - name: linux-aarch64
             runner: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
-            deps: sudo apt-get update && sudo apt-get install -y protobuf-compiler libprotobuf-dev pkg-config mold
+            deps: curl -fsSL https://github.com/rui314/mold/releases/download/v2.41.0/mold-2.41.0-aarch64-linux.tar.gz | sudo tar -xz --strip-components=1 -C /usr/local
           - name: macos-aarch64
             runner: macos-14
             target: aarch64-apple-darwin
-            deps: brew install protobuf
+            deps: "true"
 
     steps:
       - uses: actions/checkout@v6
