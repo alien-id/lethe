@@ -341,6 +341,9 @@ pub(super) struct TurnExecutionContext {
 
 /// Build the actor turn executor that the [`ActorRuntime`] supervisor calls
 /// to run each subagent turn. Wraps the standard tool loop with actor wiring.
+/// `tool_policy` is the hosting process's capability boundary: subagent turns
+/// run under the exact same policy as the cortex turns that spawned them, so
+/// a hosted subagent can never reach tools its host denies.
 pub(super) fn actor_turn_executor(
     settings: Settings,
     memory: Arc<MemoryStore>,
@@ -348,6 +351,7 @@ pub(super) fn actor_turn_executor(
     shell: ShellTools,
     last_prompt_tokens: Arc<AtomicU64>,
     hosted_plugins: Option<Arc<crate::tools::hosted_plugins::HostedPluginClient>>,
+    tool_policy: crate::tools::registry::ToolPolicy,
 ) -> ActorTurnExecutor {
     let context = TurnExecutionContext {
         settings,
@@ -367,6 +371,7 @@ pub(super) fn actor_turn_executor(
                     is_subagent: true,
                 }),
                 requested_tools: spec.requested_tools.clone(),
+                policy: tool_policy,
                 ..ToolRuntime::default()
             };
             let mut system_prompt = spec.system_prompt.clone();

@@ -113,13 +113,29 @@ impl ActorRuntime {
             .map_err(actor_runtime_error)
     }
 
-    pub async fn build_requestable_directory(&self, actor_id: &str) -> ActorResult<String> {
+    pub async fn build_requestable_directory(
+        &self,
+        actor_id: &str,
+        has_agent_id_state: bool,
+    ) -> ActorResult<String> {
         self.supervisor
             .ask(BuildRequestableDirectory {
                 actor_id: actor_id.to_string(),
+                has_agent_id_state,
             })
             .await
             .map_err(actor_runtime_error)
+    }
+
+    /// Stop the supervisor and every resident worker. A hosting process that
+    /// drops agents while the process lives (e.g. an LRU agent cache) must
+    /// call this: the supervisor and its workers hold mutually referencing
+    /// `ActorRef`s, so dropping the last external handle alone would leave the
+    /// kameo actors alive forever. Actor state is already persisted
+    /// write-through, so a later rebuild restores unfinished subagents the
+    /// same way a process restart does.
+    pub fn shutdown(&self) {
+        let _ = self.supervisor.tell(Shutdown).try_send();
     }
 
     pub async fn is_subagent(&self, actor_id: &str) -> bool {
@@ -444,6 +460,7 @@ impl Message<BuildSystemPrompt> for ActorSupervisor {
 #[derive(Debug)]
 struct BuildRequestableDirectory {
     actor_id: String,
+    has_agent_id_state: bool,
 }
 
 impl Message<BuildRequestableDirectory> for ActorSupervisor {
@@ -454,7 +471,32 @@ impl Message<BuildRequestableDirectory> for ActorSupervisor {
         message: BuildRequestableDirectory,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        self.registry.build_requestable_directory(&message.actor_id)
+        self.registry
+            .build_requestable_directory(&message.actor_id, message.has_agent_id_state)
+    }
+}
+
+#[derive(Debug)]
+struct Shutdown;
+
+impl Message<Shutdown> for ActorSupervisor {
+    type Reply = ();
+
+    async fn handle(
+        &mut self,
+        _message: Shutdown,
+        ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        // Kill (not stop_gracefully): a worker mid-turn is awaiting an LLM
+        // call inside its message handler; graceful stop would wait for it.
+        // The registry's write-through store already holds the last completed
+        // checkpoint, which is exactly what a process restart would resume
+        // from.
+        for worker in self.workers.values() {
+            worker.kill();
+        }
+        self.workers.clear();
+        ctx.actor_ref().kill();
     }
 }
 

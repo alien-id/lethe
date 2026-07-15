@@ -36,7 +36,7 @@ use crate::memory::{MemoryStore, MemoryStoreError};
 use crate::scheduler::curator::{CuratorError, CuratorRunStats, MemoryCurator};
 use crate::tools::hosted_plugins::HostedPluginClient;
 use crate::tools::registry::{
-    ActorToolContext, SharedActorRegistry, ToolRuntime, requestable_tools_directory_for,
+    ActorToolContext, SharedActorRegistry, ToolPolicy, ToolRuntime, requestable_tools_directory_for,
 };
 use crate::tools::shell::ShellTools;
 
@@ -213,6 +213,20 @@ impl Agent {
         settings: Settings,
         memory: Arc<MemoryStore>,
     ) -> AgentResult<Self> {
+        Self::from_settings_with_memory_policy(settings, memory, ToolPolicy::Full)
+    }
+
+    /// [`Agent::from_settings_with_memory`] with an explicit capability
+    /// policy. A hosted multiplexer passes [`ToolPolicy::HostedSafe`] so the
+    /// policy applies not only to the turns it constructs itself but also to
+    /// everything the agent runs internally on the host's behalf: subagent
+    /// turns spawned by the actor runtime and the `<available_on_request>`
+    /// directories rendered into actor prompts.
+    pub fn from_settings_with_memory_policy(
+        settings: Settings,
+        memory: Arc<MemoryStore>,
+        tool_policy: ToolPolicy,
+    ) -> AgentResult<Self> {
         let prompts = PromptStore::new(&settings.paths.workspace_dir, &settings.paths.config_dir);
         let router = Arc::new(RwLock::new(LlmRouter::new(LlmRouterConfig::from_settings(
             &settings,
@@ -223,6 +237,7 @@ impl Agent {
         let (actor_registry, principal_actor_id) = if settings.background.actors_enabled {
             let mut registry = ActorRegistry::new();
             registry.set_prompts(prompts.clone());
+            registry.set_tool_policy(tool_policy);
             // Durable actor state: snapshots every mutation into the unified
             // memory DB and rehydrates unfinished subagents after a restart —
             // a deploy or self-restart interrupts work instead of erasing it.
@@ -248,6 +263,7 @@ impl Agent {
                     shell.clone(),
                     last_prompt_tokens.clone(),
                     hosted_plugins.clone(),
+                    tool_policy,
                 ))
                 .map_err(|error| AgentError::Llm(anyhow!("actor runtime failed: {error}")))?;
             (Some(runtime), Some(principal_id))
@@ -415,7 +431,7 @@ impl Agent {
     async fn requestable_tools_directory_async(&self, req: &TurnRequest) -> AgentResult<String> {
         if let (Some(registry), Some(actor_id)) = (&self.actor_registry, &self.principal_actor_id) {
             let mut directory = registry
-                .build_requestable_directory(actor_id)
+                .build_requestable_directory(actor_id, req.runtime.agent_id_state_dir.is_some())
                 .await
                 .map_err(|error| {
                     AgentError::Llm(anyhow!("requestable directory failed: {error}"))

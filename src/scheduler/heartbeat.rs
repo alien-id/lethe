@@ -63,6 +63,18 @@ pub struct HeartbeatOutcome {
     pub idle_minutes: Option<u64>,
 }
 
+/// The dynamic (non-config) part of a [`Heartbeat`], serializable so a host
+/// that cannot keep a resident heartbeat task per agent (e.g. a multi-tenant
+/// mux driving beats from a durable queue) can persist it between beats.
+/// Config is deliberately excluded: it is re-derived from settings on every
+/// restore, so tuning changes take effect without state migrations.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct HeartbeatState {
+    pub last_full_context: Option<DateTime<Utc>>,
+    pub heartbeat_count: u64,
+    pub idle_minutes_accum: u64,
+}
+
 #[derive(Clone, Debug)]
 pub struct Heartbeat {
     config: HeartbeatConfig,
@@ -73,11 +85,23 @@ pub struct Heartbeat {
 
 impl Heartbeat {
     pub fn new(config: HeartbeatConfig) -> Self {
+        Self::with_state(config, HeartbeatState::default())
+    }
+
+    pub fn with_state(config: HeartbeatConfig, state: HeartbeatState) -> Self {
         Self {
             config,
-            last_full_context: None,
-            heartbeat_count: 0,
-            idle_minutes_accum: 0,
+            last_full_context: state.last_full_context,
+            heartbeat_count: state.heartbeat_count,
+            idle_minutes_accum: state.idle_minutes_accum,
+        }
+    }
+
+    pub fn state(&self) -> HeartbeatState {
+        HeartbeatState {
+            last_full_context: self.last_full_context,
+            heartbeat_count: self.heartbeat_count,
+            idle_minutes_accum: self.idle_minutes_accum,
         }
     }
 

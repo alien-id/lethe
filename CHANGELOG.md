@@ -1,5 +1,38 @@
 # Changelog
 
+## Unreleased - hosted subagents/DMN, host-driven brainstem beats
+
+- **Subagent orchestration works under the hosted-safe policy.** The actor
+  tools (`spawn_actor`, `spawn_chain`, `send_message`, `terminate`, …) are now
+  allowlisted by `ToolPolicy::HostedSafe`: they only manage internal LLM
+  workers, and every subagent turn re-enters the same policy gate. The host's
+  policy is threaded into the agent via the new
+  `Agent::from_settings_with_memory_policy`, so internally executed subagent
+  turns no longer default to the full local catalog, and the actor prompt
+  `<available_on_request>` directories honor the active policy (previously
+  hardcoded `Full`) plus the per-turn agent-id state so hosted agents are
+  never shown tools that dispatch would reject.
+- **Brainstem beats are host-drivable.** New `brainstem::beat` runs one beat
+  with caller-owned, serializable state (`BeatState`: heartbeat counters,
+  proactive rate limiter, deferred outbox — `Heartbeat` gained
+  `state()`/`with_state`), takes the host's per-turn `ToolRuntime`, and
+  returns the messages to deliver. The resident `run` loop and `trigger_once`
+  are now thin wrappers over it.
+- **DMN and subagent notifications reach users in server mode.** Beats now
+  drain the gated `user_notify` pipeline (heuristic + aux-LLM review) and emit
+  survivors alongside the heartbeat's own proactive message; previously only
+  the CLI `heartbeat trigger` path harvested them. Delivered proactive
+  messages are also recorded in conversation history, so the agent remembers
+  what it proactively told the user.
+- **Heartbeat reminders read the injected memory store.** `active_reminders`
+  no longer rebuilds a local store from settings — hosted deployments with an
+  injected backend were silently reading an empty local database.
+- **`ActorRuntime::shutdown()` for embedding hosts.** The kameo supervisor
+  and its resident workers hold mutually referencing refs; hosts that drop
+  agents while the process lives (LRU caches) can now stop the runtime
+  explicitly instead of leaking it. Unfinished subagents restore from the
+  write-through store on the next build, exactly like a process restart.
+
 ## 0.23.7 - gpt-5.x on Chat Completions, agent-browser freshness
 
 - **OpenAI reasoning models work again.** gpt-5.x / o-series turns on Chat

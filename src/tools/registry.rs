@@ -64,6 +64,18 @@ impl ToolPolicy {
                     || name.starts_with("agent_id_")
                     || name.starts_with("vault_")
                     || name.starts_with("alien_browser_")
+                    // Subagent orchestration (spawn/message/terminate/...) is
+                    // allowed: these tools only manage internal LLM workers and
+                    // never touch host resources directly. Every subagent turn
+                    // re-enters this same policy gate for its own tool catalog,
+                    // so a hosted subagent cannot escalate past HostedSafe.
+                    || find_def(name).is_some_and(|def| {
+                        matches!(
+                            def.category,
+                            crate::tools::spec::ToolCategory::Actor
+                                | crate::tools::spec::ToolCategory::ActorSubagent
+                        )
+                    })
             }
         }
     }

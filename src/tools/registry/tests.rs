@@ -293,6 +293,78 @@ fn hosted_safe_policy_exposes_memory_but_blocks_local_execution() {
 }
 
 #[test]
+fn hosted_safe_policy_allows_subagent_orchestration() {
+    // Actor tools manage internal LLM workers only, and every subagent turn
+    // re-enters the same policy gate — so hosted agents may orchestrate.
+    for name in [
+        "spawn_actor",
+        "spawn_chain",
+        "send_message",
+        "wait_for_response",
+        "discover_actors",
+        "ping_actor",
+        "kill_actor",
+        "update_task_state",
+        "get_task_state",
+        "terminate",
+        "restart_self",
+    ] {
+        assert!(
+            ToolPolicy::HostedSafe.allows_builtin(name),
+            "hosted policy must allow actor tool {name}"
+        );
+    }
+    // The category lookup must not accidentally admit non-actor tools that
+    // share no hosted prefix.
+    assert!(!ToolPolicy::HostedSafe.allows_builtin("write_file"));
+    assert!(!ToolPolicy::HostedSafe.allows_builtin("web_search"));
+
+    // With an actor context attached under the hosted policy, orchestration is
+    // available to the cortex on request (not pre-loaded), exactly as in the
+    // full-policy standalone binary.
+    let (_tmp, memory, shell) = registry();
+    let actor_runtime = crate::actor::ActorRuntime::new(crate::actor::ActorRegistry::new());
+    let registry = ToolRegistry::with_runtime(
+        &memory,
+        memory.workspace_dir(),
+        "/tmp/lethe-cache",
+        &shell,
+        ToolRuntime {
+            policy: ToolPolicy::HostedSafe,
+            actor: Some(ActorToolContext {
+                runtime: actor_runtime,
+                actor_id: "cortex-test".to_string(),
+                is_subagent: false,
+            }),
+            ..ToolRuntime::default()
+        },
+    );
+    assert!(registry.tool_is_available("spawn_actor"));
+    assert!(registry.tool_is_available("send_message"));
+    assert!(!registry.is_initial_tool("spawn_actor"));
+    assert!(!registry.tool_is_available("bash"));
+
+    // The subagent-facing requestable directory honors the hosted policy: no
+    // local execution families, no identity/vault families without a tenant
+    // agent-id state dir. Actor tools are pre-loaded for subagents, so they
+    // are deliberately absent from the on-request listing too.
+    let directory = requestable_tools_directory_for_shape(ToolContextShape {
+        has_actor: true,
+        is_subagent: true,
+        has_telegram: false,
+        has_client: false,
+        has_agent_id_state: false,
+        policy: ToolPolicy::HostedSafe,
+    });
+    assert!(!directory.contains("spawn_actor"));
+    assert!(!directory.contains("bash"));
+    assert!(!directory.contains("read_file"));
+    assert!(!directory.contains("web_search"));
+    assert!(!directory.contains("alien_browser_open"));
+    assert!(!directory.contains("agent_id_status"));
+}
+
+#[test]
 fn executes_todo_update_and_reminder_tools() {
     let (_tmp, memory, shell) = registry();
     let registry = ToolRegistry::new(&memory, memory.workspace_dir(), "/tmp/lethe-cache", &shell);
