@@ -1,7 +1,17 @@
 # Changelog
 
-## Unreleased - hosted subagents/DMN, host-driven brainstem beats, jailed file tools
+## 0.24.0 - Postgres memory backend, hosted subagents/DMN, jailed file tools, browser stream
 
+- **Pluggable memory storage with a tenant-scoped PostgreSQL backend.** The
+  block/archival/message/note/todo stores now sit behind storage traits
+  (`src/memory/backend.rs`); the new `postgres-memory` feature provides
+  `PostgresMemory`/`PostgresMemoryFactory` for multi-tenant hosts, with
+  transaction-local tenant scoping. SQLite remains the standalone default.
+- **Hosted hardening for Agent ID and the sealed browser.** Tenant-safe
+  browser logs, a generalized hosted browser gate, a single bind poll per
+  pending-auth file, and no builtin browser under the hosted policy.
+- **`/browser/stream` WebSocket relay** for the live sealed-browser viewport
+  feed on the standalone HTTP API.
 - **Workspace-jailed file/image tools under the hosted policy.**
   `FileTools::sandboxed` / `ImageTools::sandboxed` confine every path —
   absolute, relative, `~`, `..`, or through a symlink — to the workspace
