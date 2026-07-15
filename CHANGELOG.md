@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.25.0 - Host-observable subagent turns, richer actor events
+
+- **Hosts can observe subagent turns.** A new
+  `Agent::install_subagent_observer` hook accepts a factory
+  (`SubagentObserverFactory`) that the actor turn executor calls with the
+  acting actor's id at the start of every subagent turn; the returned
+  `TurnObserver` is threaded through the tool loop, so hosts can attribute
+  per-subagent tool calls and reasoning on their own event streams. Without an
+  installed factory subagent turns run unobserved, exactly as before.
+- **`actor_spawned` carries the actor's `goals`**, so clients can title a
+  subagent's task straight from the spawn event instead of fetching the
+  roster.
+- **Richer `actor.*` events on the standalone `/events` feed:** every event
+  (`actor.state`, `actor.task`, `actor.message`) now carries `group` — not
+  just `actor.spawned` — so principal (`main`) and subagent activity separate
+  without stateful correlation; and `user_notify` bus events surface as
+  `actor.user_notify` (full message text, intent under `kind`) instead of
+  being dropped.
+
 ## 0.24.0 - Postgres memory backend, hosted subagents/DMN, jailed file tools, browser stream
 
 - **Pluggable memory storage with a tenant-scoped PostgreSQL backend.** The
