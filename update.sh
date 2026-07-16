@@ -14,7 +14,7 @@ NC='\033[0m'
 LETHE_HOME="${LETHE_HOME:-$HOME/.lethe}"
 INSTALL_DIR="${LETHE_INSTALL_DIR:-$LETHE_HOME/install}"
 BIN_DIR="$LETHE_HOME/bin"
-REPO_OWNER="${LETHE_REPO_OWNER:-atemerev}"
+REPO_OWNER="${LETHE_REPO_OWNER:-alien-id}"
 REPO_NAME="${LETHE_REPO_NAME:-lethe}"
 RELEASE_BASE_URL="${LETHE_RELEASE_BASE_URL:-https://github.com/$REPO_OWNER/$REPO_NAME/releases/latest/download}"
 

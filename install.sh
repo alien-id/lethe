@@ -26,7 +26,7 @@ BLUE='\033[0;34m'
 NC='\033[0m'
 
 REPO_URL="${LETHE_REPO_URL:-https://github.com/alien-id/lethe.git}"
-REPO_OWNER="${LETHE_REPO_OWNER:-atemerev}"
+REPO_OWNER="${LETHE_REPO_OWNER:-alien-id}"
 REPO_NAME="${LETHE_REPO_NAME:-lethe}"
 RELEASE_BASE_URL="${LETHE_RELEASE_BASE_URL:-https://github.com/$REPO_OWNER/$REPO_NAME/releases/latest/download}"
 LETHE_HOME="${LETHE_HOME:-$HOME/.lethe}"

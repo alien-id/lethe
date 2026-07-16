@@ -235,7 +235,7 @@ fn container_arch() -> &'static str {
 
 fn release_base_url() -> String {
     std::env::var("LETHE_RELEASE_BASE_URL").unwrap_or_else(|_| {
-        let owner = std::env::var("LETHE_REPO_OWNER").unwrap_or_else(|_| "atemerev".into());
+        let owner = std::env::var("LETHE_REPO_OWNER").unwrap_or_else(|_| "alien-id".into());
         let name = std::env::var("LETHE_REPO_NAME").unwrap_or_else(|_| "lethe".into());
         format!("https://github.com/{owner}/{name}/releases/latest/download")
     })
