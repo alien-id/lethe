@@ -1,5 +1,57 @@
 # Changelog
 
+## 0.26.0 - GPT-5.x via Responses API, genai 0.6.5, OpenRouter prompt caching, sealed-browser forms
+
+- **gpt-5.x agent turns work again.** OpenAI's Chat Completions endpoint
+  rejects function tools combined with any reasoning effort other than `none`
+  on the gpt-5 reasoning family, and an agent request always carries tools —
+  so every gpt-5.x turn 400'd. Direct-OpenAI gpt-5 reasoning models now route
+  to `/v1/responses` (`AdapterKind::OpenAIResp`), which supports tools and
+  reasoning together. Sampling params are handled at the caller:
+  `LlmRouterConfig::chat_options` now takes the model and skips
+  `temperature` for OpenAI reasoning models (they reject non-default
+  sampling); relayed ids (`openrouter/…`, `opencode-go/…`) are untouched.
+- **Vendored genai upgraded 0.5.3 → 0.6.5; the fork shrank from four patches
+  to one.** Upstream absorbed the 1h cache TTL (`CacheControl::Ephemeral1h`
+  replaces the fork's `Persistent`), `max_completion_tokens`, and ships a
+  real OpenAI Responses streamer (tool-call deltas included). The single
+  remaining patch forwards per-message `cache_control` through the OpenAI
+  adapter — upstream only supports request-level cache control, which cannot
+  reach providers behind OpenRouter. See `vendor/genai/LETHE_FORK.md`.
+- **OpenRouter prompt caching actually engages now.** The dialect layer
+  routed all OpenRouter models to "no cache markers" on the mistaken belief
+  that OpenRouter strips `cache_control`; it forwards it upstream. Every
+  turn on OpenRouter → Anthropic/Gemini/Qwen re-billed the full system
+  prompt since May. `openrouter/anthropic/*` now gets the 1h + 5m
+  breakpoints, `openrouter/google/*` and `openrouter/qwen/*` get explicit
+  5m markers (1h TTL is Anthropic-only), and vendors with automatic prefix
+  caching (OpenAI, Grok, Moonshot, Z.AI, …) correctly stay unmarked.
+- **Web and knowledge-graph tools no longer panic the turn.** `web_search`,
+  `fetch_webpage` and the `kg_*` family used `reqwest::blocking` inside
+  `ToolExecutor::Sync`, which runs on the tokio worker — the blocking
+  client's internal runtime dies there with "Cannot drop a runtime in a
+  context where blocking is not allowed", killing the turn (surfaced under
+  lethe-mux once the tools were unblocked). All of them are now genuinely
+  async (`ToolExecutor::Async`, async `reqwest`, explicit 30s timeouts —
+  the async client has no default timeout, unlike the blocking one).
+  Remaining Sync executors (e.g. Telegram egress) run under
+  `tokio::task::block_in_place` on multi-thread runtimes as a safety net,
+  and the no-blocking-I/O constraint is documented on `SyncExecutor`.
+- **The standalone browser tool family is removed; the sealed Alien browser
+  is the only browser.** `src/tools/browser.rs` (the `browser_*` tools) is
+  gone; the shell tool detects and refuses attempts to reinstall or drive
+  the removed `agent-browser` package. New `alien_browser_inspect_form` /
+  `alien_browser_fill_form` tools handle whole forms in one call — fields,
+  checks, selects, uploads and submit — with upload paths resolved through
+  the turn's file-access policy, so hosted form filling stays
+  workspace-jailed. The browser stream drops the plain (non-Alien) source.
+- **Hard context ceiling re-applied on every tool iteration.** The initial
+  turn clamp couldn't account for schemas loaded mid-turn via
+  `request_tool` or long assistant/tool-result chains; the tool loop now
+  re-clamps each iteration, dropping the oldest completed tool exchanges
+  first, then oldest pre-turn history, always preserving system messages
+  and the current user ask.
+
 ## 0.25.0 - Host-observable subagent turns, richer actor events
 
 - **Hosts can observe subagent turns.** A new
