@@ -1,6 +1,6 @@
 # Lethe
 
-[![Release](https://img.shields.io/github/v/release/atemerev/lethe?style=flat-square&color=blue)](https://github.com/atemerev/lethe/releases/latest)
+[![Release](https://img.shields.io/github/v/release/alien-id/lethe?style=flat-square&color=blue)](https://github.com/alien-id/lethe/releases/latest)
 [![License](https://img.shields.io/badge/license-MIT-green?style=flat-square)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.88+-orange?style=flat-square&logo=rust)](https://www.rust-lang.org/)
 ![Swiss Made Software](https://img.shields.io/badge/swiss%20made-software-red?style=flat-square&labelColor=FF0000&logoColor=white)
@@ -23,7 +23,7 @@ Prefer to build from source?
 > Linux linker note: check `.cargo/config.toml` first. If it points at `mold`, install it before building (`sudo dnf install mold` or `sudo apt-get install mold`) or adjust the linker setting for your system.
 
 ```bash
-git clone https://github.com/atemerev/lethe.git
+git clone https://github.com/alien-id/lethe.git
 cd lethe
 cargo build --release
 install -m 755 target/release/lethe ~/.local/bin/lethe
@@ -97,7 +97,7 @@ Core runtime pieces:
 ## Build
 
 ```bash
-git clone https://github.com/atemerev/lethe.git
+git clone https://github.com/alien-id/lethe.git
 cd lethe
 cp .env.example .env
 cargo build --release
