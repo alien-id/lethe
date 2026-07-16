@@ -2404,6 +2404,82 @@ mod tests {
         assert!(later.contains("turn 2/3"));
     }
 
+    fn system_message(content: &str) -> LlmMessage {
+        LlmMessage {
+            role: LlmRole::System,
+            content: content.to_string(),
+            attachments: vec![],
+            tool_calls: vec![],
+            tool_responses: vec![],
+            cache_control: None,
+        }
+    }
+
+    /// The OpenRouter → Claude cache path, end to end: dialect → markers →
+    /// genai request. This crosses the seam that actually broke: the dialect
+    /// silently returned "no marker" while the adapter stood ready to emit one,
+    /// so every turn re-billed the full prompt. Testing either layer alone
+    /// misses that, which is why this test spans both.
+    #[test]
+    fn openrouter_claude_carries_cache_control_into_the_genai_request() {
+        let mut messages = vec![
+            system_message("identity + persona + instructions"),
+            system_message("clock + memory state + recall"),
+            LlmMessage {
+                role: LlmRole::User,
+                content: "hi".to_string(),
+                attachments: vec![],
+                tool_calls: vec![],
+                tool_responses: vec![],
+                cache_control: None,
+            },
+        ];
+
+        let dialect = dialect_for_model("openrouter/anthropic/claude-opus-4.7");
+        apply_cache_markers(&mut messages, dialect.as_ref());
+
+        let request = crate::llm::build_chat_request(messages);
+        let marker = |index: usize| {
+            request.messages[index]
+                .options
+                .as_ref()
+                .and_then(|options| options.cache_control.clone())
+        };
+
+        assert_eq!(
+            marker(0),
+            Some(genai::chat::CacheControl::Ephemeral1h),
+            "the stable prefix must carry the 1h marker OpenRouter forwards to Anthropic"
+        );
+        assert_eq!(
+            marker(1),
+            Some(genai::chat::CacheControl::Ephemeral),
+            "the volatile tail must carry the 5m marker"
+        );
+        assert_eq!(marker(2), None, "user messages carry no cache marker");
+    }
+
+    /// A vendor with automatic prefix caching must stay unmarked all the way
+    /// through, not just at the dialect.
+    #[test]
+    fn openrouter_kimi_carries_no_cache_control_into_the_genai_request() {
+        let mut messages = vec![
+            system_message("identity + persona"),
+            system_message("clock + recall"),
+        ];
+
+        let dialect = dialect_for_model("openrouter/moonshotai/kimi-k2.6");
+        apply_cache_markers(&mut messages, dialect.as_ref());
+
+        let request = crate::llm::build_chat_request(messages);
+        for (index, message) in request.messages.iter().enumerate() {
+            assert!(
+                message.options.as_ref().and_then(|o| o.cache_control.as_ref()).is_none(),
+                "message {index} must stay unmarked — Moonshot caches automatically"
+            );
+        }
+    }
+
     #[test]
     fn archive_old_images_strips_old_image_payloads() {
         let image_content = format!(

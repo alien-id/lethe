@@ -671,7 +671,10 @@ fn openai_user_input_items(content: MessageContent) -> Vec<Value> {
                     "output": response.content,
                 }));
             }
-            ContentPart::ToolCall(_) | ContentPart::ThoughtSignature(_) => {}
+            ContentPart::ToolCall(_)
+            | ContentPart::ThoughtSignature(_)
+            | ContentPart::ReasoningContent(_)
+            | ContentPart::Custom(_) => {}
         }
     }
     if !parts.is_empty() {
@@ -715,7 +718,9 @@ fn openai_assistant_input_items(content: MessageContent) -> Vec<Value> {
             }
             ContentPart::Binary(_)
             | ContentPart::ToolResponse(_)
-            | ContentPart::ThoughtSignature(_) => {}
+            | ContentPart::ThoughtSignature(_)
+            | ContentPart::ReasoningContent(_)
+            | ContentPart::Custom(_) => {}
         }
     }
     let mut items: Vec<Value> = Vec::new();
@@ -746,7 +751,7 @@ fn openai_tool_result_input_items(content: MessageContent) -> Vec<Value> {
 fn openai_tool_schema(tool: Tool) -> Value {
     let mut entry = Map::new();
     entry.insert("type".to_string(), Value::String("function".to_string()));
-    entry.insert("name".to_string(), Value::String(tool.name));
+    entry.insert("name".to_string(), Value::String(tool.name.to_string()));
     if let Some(description) = tool.description {
         entry.insert("description".to_string(), Value::String(description));
     }
@@ -1212,6 +1217,7 @@ fn openai_response_to_chat_response(data: Value, requested_model: &str) -> Resul
         {
             usage.prompt_tokens_details = Some(PromptTokensDetails {
                 cache_creation_tokens: None,
+                cache_creation_details: None,
                 cached_tokens: Some(cached as i32),
                 audio_tokens: None,
             });
@@ -1224,6 +1230,8 @@ fn openai_response_to_chat_response(data: Value, requested_model: &str) -> Resul
         reasoning_content: None,
         model_iden: ModelIden::new(AdapterKind::OpenAI, requested_model.to_string()),
         provider_model_iden: ModelIden::new(AdapterKind::OpenAI, provider_model),
+        stop_reason: None,
+        response_id: None,
         usage,
         captured_raw_body: None,
     })

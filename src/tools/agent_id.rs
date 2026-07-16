@@ -20,7 +20,8 @@ use crate::agent_id::secure_prompt::SecurePromptHub;
 use crate::tools::registry::ToolRegistry;
 use crate::tools::registry::args::{bool_arg, nonempty_string, string_arg, string_vec_arg};
 use crate::tools::spec::{
-    ToolCategory, ToolDef, ToolExecutor, p_bool, p_enum, p_obj, p_str, p_str_array, p_str_req,
+    ToolCategory, ToolDef, ToolExecutor, p_bool, p_enum, p_form_plan_req, p_obj, p_str,
+    p_str_array, p_str_req,
 };
 
 type BoxFuture<'a> = Pin<Box<dyn Future<Output = String> + Send + 'a>>;
@@ -215,8 +216,9 @@ async fn fast_json(bin: Bin, sd: &Path, argv: &[String]) -> Value {
 /// concurrent 14-minute `agent-id-core bind` child processes against one
 /// pending-auth file — which, unbounded and detached, can exhaust a shared
 /// multi-tenant container's `--pids-limit`.
-static ACTIVE_BIND_POLLS: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<PathBuf>>> =
-    std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashSet::new()));
+static ACTIVE_BIND_POLLS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashSet<PathBuf>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashSet::new()));
 
 /// Poll `bind` in the background so the turn never blocks the ~14-minute human
 /// ceremony. Emits `agent_id.bound` on success when a hub is present. At most
@@ -411,6 +413,13 @@ fn exec_browser_open<'a>(r: &'a ToolRegistry<'a>, args: &'a Value) -> BoxFuture<
     Box::pin(async move {
         let sd = state_dir_of(r);
         let name = nonempty_string(args, "name").unwrap_or_else(|| "main".to_string());
+        let url = nonempty_string(args, "url");
+        if hosted_safe(r)
+            && let Some(url) = url.as_deref()
+            && !is_http_url(url)
+        {
+            return err("Hosted browser navigation must use http:// or https://.");
+        }
         let mut argv = vec!["open".to_string(), "--name".to_string(), name.clone()];
         if bool_arg(args, "headed", false) {
             if !crate::agent_id::browser_headed_available() {
@@ -420,7 +429,7 @@ fn exec_browser_open<'a>(r: &'a ToolRegistry<'a>, args: &'a Value) -> BoxFuture<
         }
         // Keep the daemon log inside this tenant's state dir, not a shared
         // /tmp path: many tenants run in one process, so a global
-        // `agent-browser-{name}.log` lets one tenant's daemon truncate and
+        // `browser-{name}.log` lets one tenant's daemon truncate and
         // interleave another's diagnostics — and `name` is model-controlled,
         // so a global path also invites traversal. `sanitize_session_name`
         // keeps the filename to a safe slug.
@@ -436,7 +445,29 @@ fn exec_browser_open<'a>(r: &'a ToolRegistry<'a>, args: &'a Value) -> BoxFuture<
         )
         .await
         {
-            Ok(ready) => ready.to_string(),
+            Ok(ready) => {
+                let Some(url) = url else {
+                    return ready.to_string();
+                };
+                let navigation = fast_json(
+                    Bin::Browser,
+                    &sd,
+                    &[
+                        "navigate".to_string(),
+                        "--url".to_string(),
+                        url,
+                        "--name".to_string(),
+                        name,
+                    ],
+                )
+                .await;
+                json!({
+                    "ok": navigation.get("ok").and_then(Value::as_bool) == Some(true),
+                    "session": ready,
+                    "navigation": navigation,
+                })
+                .to_string()
+            }
             Err(message) => err(message),
         }
     })
@@ -470,6 +501,14 @@ fn exec_browser_act<'a>(r: &'a ToolRegistry<'a>, args: &'a Value) -> BoxFuture<'
                 "Use alien_browser_fill_secret / alien_browser_fill_otp for credential injection.",
             );
         }
+        if matches!(
+            action.as_str(),
+            "fill" | "upload" | "form-inspect" | "form-fill"
+        ) {
+            return err(
+                "Use alien_browser_inspect_form and alien_browser_fill_form for ordinary form fields and workspace file uploads.",
+            );
+        }
         let mut params = args
             .get("params")
             .and_then(Value::as_object)
@@ -485,6 +524,67 @@ fn exec_browser_act<'a>(r: &'a ToolRegistry<'a>, args: &'a Value) -> BoxFuture<'
         push_opt(&mut argv, "--name", nonempty_string(args, "name"));
         fast(Bin::Browser, &sd, &argv).await
     })
+}
+
+fn exec_browser_inspect_form<'a>(r: &'a ToolRegistry<'a>, args: &'a Value) -> BoxFuture<'a> {
+    Box::pin(async move {
+        let sd = state_dir_of(r);
+        let mut argv = vec!["form-inspect".to_string()];
+        push_opt(&mut argv, "--name", nonempty_string(args, "name"));
+        fast(Bin::Browser, &sd, &argv).await
+    })
+}
+
+fn exec_browser_fill_form<'a>(r: &'a ToolRegistry<'a>, args: &'a Value) -> BoxFuture<'a> {
+    Box::pin(async move {
+        let sd = state_dir_of(r);
+        let Some(mut plan) = args.get("plan").and_then(Value::as_object).cloned() else {
+            return err("`plan` is required.");
+        };
+        if let Err(message) = resolve_form_uploads(r, &mut plan) {
+            return err(message);
+        }
+        let Ok(spec) = serde_json::to_string(&plan) else {
+            return err("Could not encode the form plan.");
+        };
+        let mut argv = vec!["form-fill".to_string(), "--spec".to_string(), spec];
+        push_opt(&mut argv, "--name", nonempty_string(args, "name"));
+        fast(Bin::Browser, &sd, &argv).await
+    })
+}
+
+/// Canonicalize only upload paths, through the same FileTools policy the rest
+/// of the turn uses. Hosted registries are workspace-jailed; standalone keeps
+/// its established full-machine behavior. Other form values are untouched.
+fn resolve_form_uploads(
+    registry: &ToolRegistry<'_>,
+    plan: &mut serde_json::Map<String, Value>,
+) -> Result<(), String> {
+    let Some(uploads) = plan.get_mut("uploads") else {
+        return Ok(());
+    };
+    let Some(uploads) = uploads.as_array_mut() else {
+        return Err("`plan.uploads` must be an array.".to_string());
+    };
+    for upload in uploads {
+        let Some(upload) = upload.as_object_mut() else {
+            return Err("Each upload must be an object with `ref` and `files`.".to_string());
+        };
+        let Some(files) = upload.get_mut("files").and_then(Value::as_array_mut) else {
+            return Err("Each upload needs a `files` array.".to_string());
+        };
+        for file in files {
+            let Some(raw) = file.as_str() else {
+                return Err("Upload file paths must be strings.".to_string());
+            };
+            let resolved = registry
+                .files
+                .resolve_existing_file(raw)
+                .map_err(|message| format!("Upload denied: {message}"))?;
+            *file = Value::String(resolved.to_string_lossy().into_owned());
+        }
+    }
+    Ok(())
 }
 
 fn exec_browser_fill_secret<'a>(r: &'a ToolRegistry<'a>, args: &'a Value) -> BoxFuture<'a> {
@@ -542,10 +642,20 @@ fn exec_browser_fill_otp<'a>(r: &'a ToolRegistry<'a>, args: &'a Value) -> BoxFut
 fn sanitize_session_name(name: &str) -> String {
     let slug: String = name
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .take(64)
         .collect();
-    if slug.is_empty() { "session".to_string() } else { slug }
+    if slug.is_empty() {
+        "session".to_string()
+    } else {
+        slug
+    }
 }
 
 fn push_opt(argv: &mut Vec<String>, flag: &str, value: Option<String>) {
@@ -566,7 +676,8 @@ const HOSTED_BLOCKED_BROWSER_ACTIONS: &[&str] = &["upload"];
 /// with a `--path`/`--output` flag can't become an indirect file-write. When a
 /// verb needs a file (screenshot/zoom), dropping the key falls back to the
 /// plugin's default inside this tenant's state directory.
-const HOSTED_BLOCKED_PATH_KEYS: &[&str] = &["path", "output", "out", "dest", "file", "files", "save"];
+const HOSTED_BLOCKED_PATH_KEYS: &[&str] =
+    &["path", "output", "out", "dest", "file", "files", "save"];
 
 /// Param keys carrying a navigation target. Every one must be http(s) under the
 /// hosted policy so no action can reach file://, chrome://, or a custom scheme.
@@ -746,7 +857,7 @@ pub const TOOL_DEFS: &[ToolDef] = &[
     },
     ToolDef {
         name: "alien_browser_auto_login",
-        description: "Headlessly log in using a stored `login` credential (username + password + 2FA policy) and SEAL the resulting signed-in session into a browser-profile for reuse. This is the FIRST step of the headless browser flow (there is no profile to open until this runs) — call it before alien_browser_open/act. Requires the login credential to have a login_url (set it on vault_add). 2FA is answered from a stored TOTP seed, or via a secure prompt to the owner. If it reports the login was blocked by an anti-automation wall, headed login is not available on a server — report that to the owner rather than retrying.",
+        description: "Headlessly log in using a stored `login` credential (username + password + 2FA policy) and SEAL the resulting signed-in session into a browser-profile for reuse. Public browsing does not require this: alien_browser_open auto-creates the anonymous default profile. Use auto-login only when the task actually needs an account. Requires the login credential to have a login_url (set it on vault_add). 2FA is answered from a stored TOTP seed, or via a secure prompt to the owner.",
         params: &[
             p_str_req("cred", "Name of a `login` credential in the vault."),
             p_str(
@@ -759,9 +870,10 @@ pub const TOOL_DEFS: &[ToolDef] = &[
     },
     ToolDef {
         name: "alien_browser_open",
-        description: "Start a persistent browser session daemon by unsealing an EXISTING browser-profile. A profile must already exist (created by alien_browser_auto_login, or a headed alien_browser_login on a machine with a display) — if none does this returns a 'no browser-profile' error, which means run alien_browser_auto_login first, NOT that the browser is missing. Returns once ready; drive it with alien_browser_act and close it with alien_browser_close.",
+        description: "Start the persistent Alien browser and optionally navigate in the same call. The shared `main` profile is created automatically as an anonymous L0 profile on first use, so public pages need no login/setup. Returns once ready; use the typed form tools for forms and alien_browser_act for other actions.",
         params: &[
             p_str("name", "Session name (default 'main')."),
+            p_str("url", "Optional http(s) URL to open immediately."),
             p_bool("headed", "Show the window (requires a GUI session)."),
         ],
         category: ToolCategory::AgentIdBrowser,
@@ -776,7 +888,7 @@ pub const TOOL_DEFS: &[ToolDef] = &[
     },
     ToolDef {
         name: "alien_browser_act",
-        description: "Run a browser action in an open session. `action` is a verb (snapshot, click, type, navigate, page-text, wait, tabs, tab-new, screenshot, get, scroll, press, …) and `params` its flags (e.g. {\"ref\":\"e3\",\"text\":\"hi\"}). For credential injection use the dedicated fill tools.",
+        description: "Run a non-form browser action in an open Alien session: snapshot, click, navigate, page-text, wait, tabs, screenshot, get, scroll, press, etc. Flags belong in `params`; never paste CLI syntax into a ref/value. For forms use alien_browser_inspect_form then ONE alien_browser_fill_form call; for credentials use the dedicated secret/OTP tools.",
         params: &[
             p_str_req(
                 "action",
@@ -790,6 +902,26 @@ pub const TOOL_DEFS: &[ToolDef] = &[
         ],
         category: ToolCategory::AgentIdBrowser,
         execute: ToolExecutor::Async(exec_browser_act),
+    },
+    ToolDef {
+        name: "alien_browser_inspect_form",
+        description: "Inspect only the current page's form controls in a compact structured form: refs, associated labels, types, required/checked state, select options, and file accept rules. Text/password values are never returned. Call once, then pass the refs to alien_browser_fill_form.",
+        params: &[p_str("name", "Session name (default 'main').")],
+        category: ToolCategory::AgentIdBrowser,
+        execute: ToolExecutor::Async(exec_browser_inspect_form),
+    },
+    ToolDef {
+        name: "alien_browser_fill_form",
+        description: "Fill and verify up to 50 ordinary controls in ONE fast atomic browser call. `plan` may contain fields [{ref,value}], checks [{ref,checked}], selects [{ref,values}], uploads [{ref,files}] and optional submit (a button ref). Each result is verified; failed controls and native validation errors are returned individually. Upload paths are confined to the user's workspace in hosted mode. Do not put passwords/OTP here — use the sealed credential tools.",
+        params: &[
+            p_form_plan_req(
+                "plan",
+                "Structured form plan, e.g. {\"fields\":[{\"ref\":\"e1\",\"value\":\"Ada\"}],\"checks\":[{\"ref\":\"e2\",\"checked\":true}],\"selects\":[{\"ref\":\"e3\",\"values\":[\"ms\"]}],\"uploads\":[{\"ref\":\"e4\",\"files\":[\"resume.pdf\"]}]}",
+            ),
+            p_str("name", "Session name (default 'main')."),
+        ],
+        category: ToolCategory::AgentIdBrowser,
+        execute: ToolExecutor::Async(exec_browser_fill_form),
     },
     ToolDef {
         name: "alien_browser_fill_secret",
@@ -897,7 +1029,8 @@ mod tests {
         // Not just screenshot/zoom: a future file-writing verb with a path flag
         // must have it stripped rather than forwarded to the CLI.
         for action in ["screenshot", "zoom", "pdf", "har", "record", "trace"] {
-            let mut params = map(json!({"path": "/etc/evil", "output": "/tmp/x", "region": "0,0,1,1"}));
+            let mut params =
+                map(json!({"path": "/etc/evil", "output": "/tmp/x", "region": "0,0,1,1"}));
             enforce_hosted_browser_params(action, &mut params).unwrap();
             assert!(!params.contains_key("path"), "{action} keeps path");
             assert!(!params.contains_key("output"), "{action} keeps output");
@@ -931,7 +1064,10 @@ mod tests {
     fn session_name_sanitizes_traversal_and_bounds_length() {
         assert_eq!(sanitize_session_name("main"), "main");
         assert_eq!(sanitize_session_name("work-1_A"), "work-1_A");
-        assert_eq!(sanitize_session_name("../../etc/passwd"), "______etc_passwd");
+        assert_eq!(
+            sanitize_session_name("../../etc/passwd"),
+            "______etc_passwd"
+        );
         assert_eq!(sanitize_session_name("a/b"), "a_b");
         assert_eq!(sanitize_session_name(""), "session");
         assert_eq!(sanitize_session_name(&"x".repeat(200)).len(), 64);

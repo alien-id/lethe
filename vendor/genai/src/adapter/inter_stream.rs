@@ -5,12 +5,15 @@
 //!
 //! NOTE: This might be removed at some point as it may not be needed, and we could go directly to the GenAI stream.
 
-use crate::chat::Usage;
+use crate::chat::{StopReason, Usage};
 
 #[derive(Debug, Default)]
 pub struct InterStreamEnd {
 	// When `ChatOptions..capture_usage == true`
 	pub captured_usage: Option<Usage>,
+
+	// Normalised stop reason.
+	pub captured_stop_reason: Option<StopReason>,
 
 	// When `ChatOptions..capture_content == true`
 	pub captured_text_content: Option<String>,
@@ -23,6 +26,9 @@ pub struct InterStreamEnd {
 
 	// When `ChatOptions..capture_thought_signatures == true` (implied or explicit)
 	pub captured_thought_signatures: Option<Vec<String>>,
+
+	// Response ID for stateful sessions (OpenAI Responses API).
+	pub captured_response_id: Option<String>,
 }
 
 /// Intermediary StreamEvent

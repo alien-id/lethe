@@ -3,7 +3,6 @@ use std::collections::HashSet;
 use crate::actor::ActorRuntime;
 use crate::interfaces::telegram::TelegramToolContext;
 use crate::memory::MemoryStore;
-use crate::tools::browser::BrowserTools;
 use crate::tools::filesystem::FileTools;
 use crate::tools::hosted_plugins::HostedPluginClient;
 use crate::tools::image::ImageTools;
@@ -37,7 +36,7 @@ pub type SharedActorRegistry = ActorRuntime;
 /// Controls which built-in capabilities exist for a turn. `HostedSafe` is an
 /// allowlist enforced both while schemas are assembled and again at dispatch,
 /// so a model cannot invoke a hidden local capability by name. It retains the
-/// headless browser and Alien identity/vault families; callers must provide
+/// Alien browser and identity/vault families; callers must provide
 /// tenant-private cache and agent-id state paths.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum ToolPolicy {
@@ -58,11 +57,6 @@ impl ToolPolicy {
                     || name.starts_with("conversation_")
                     || name.starts_with("note_")
                     || name.starts_with("todo_")
-                    // NOTE: the built-in `browser_*` tools (standalone
-                    // `agent-browser` CLI) are intentionally NOT allowed here.
-                    // They are not tenant-scoped through the hosted secure path
-                    // and bypass the host's browser-concurrency gate; hosted
-                    // browsing is exclusively the vault-sealed `alien_browser_*`.
                     || name.starts_with("agent_id_")
                     || name.starts_with("vault_")
                     || name.starts_with("alien_browser_")
@@ -151,7 +145,6 @@ pub struct ToolRegistry<'a> {
     pub(crate) image: ImageTools,
     pub(crate) shell: &'a ShellTools,
     pub(crate) web: WebTools,
-    pub(crate) browser: BrowserTools,
     pub(crate) runtime: ToolRuntime,
 }
 
@@ -181,11 +174,6 @@ impl<'a> ToolRegistry<'a> {
         let workspace_dir = workspace_dir.into();
         let cache_dir = cache_dir.into();
         let hosted = runtime.policy == ToolPolicy::HostedSafe;
-        let browser = if hosted {
-            BrowserTools::hosted(cache_dir.clone())
-        } else {
-            BrowserTools::new(cache_dir.clone())
-        };
         // Under the hosted policy the file/image tools are jailed to the
         // (tenant-private) workspace; the allowlist below admits them only
         // because this constructor guarantees the jailed instances.
@@ -206,7 +194,6 @@ impl<'a> ToolRegistry<'a> {
             image,
             shell,
             web: WebTools::new(cache_dir.clone()),
-            browser,
             runtime,
         }
     }
@@ -215,7 +202,7 @@ impl<'a> ToolRegistry<'a> {
         self.tools()
             .into_iter()
             .filter(|tool| {
-                self.is_initial_tool(&tool.name) || active_tools.contains(tool.name.as_str())
+                self.is_initial_tool(tool.name.as_str()) || active_tools.contains(tool.name.as_str())
             })
             .collect()
     }
@@ -288,8 +275,8 @@ impl<'a> ToolRegistry<'a> {
     }
 
     /// Tool families that form a single workflow (the vault-sealed browser's
-    /// open/act/close/fill set, the agent-id identity+vault set, the built-in
-    /// browser): requesting any member should load the whole family, so the
+    /// open/act/close/fill set and the agent-id identity+vault set): requesting
+    /// any member should load the whole family, so the
     /// model doesn't stall mid-flow on an "available but not loaded" sibling.
     pub fn group_siblings(&self, name: &str) -> Vec<String> {
         use crate::tools::spec::ToolCategory;
@@ -304,7 +291,7 @@ impl<'a> ToolRegistry<'a> {
         };
         if !matches!(
             def.category,
-            ToolCategory::AgentId | ToolCategory::AgentIdBrowser | ToolCategory::BrowserBuiltin
+            ToolCategory::AgentId | ToolCategory::AgentIdBrowser
         ) {
             return Vec::new();
         }
@@ -384,14 +371,6 @@ pub fn requestable_tools_directory_for_shape(shape: ToolContextShape) -> String 
 
     let visible = |def: &crate::tools::spec::ToolDef| match def.category {
         ToolCategory::Initial | ToolCategory::Requestable | ToolCategory::CortexOnly => true,
-        // The built-in browser is never offered under the hosted policy — it is
-        // not tenant-scoped through the secure path and isn't bounded by the
-        // host's browser-concurrency gate, so hosted browsing is exclusively the
-        // vault-sealed browser. Outside hosted, it hides when the vault-sealed
-        // browser is active (so the agent is never shown two competing browsers).
-        ToolCategory::BrowserBuiltin => {
-            policy != ToolPolicy::HostedSafe && !crate::agent_id::browser_tools_available()
-        }
         ToolCategory::Actor => has_actor,
         ToolCategory::ActorSubagent => is_subagent,
         ToolCategory::Transport => has_telegram,
@@ -408,7 +387,7 @@ pub fn requestable_tools_directory_for_shape(shape: ToolContextShape) -> String 
     } && policy.allows_builtin(def.name);
     let initial = |def: &crate::tools::spec::ToolDef| match def.category {
         ToolCategory::Initial => true,
-        ToolCategory::Requestable | ToolCategory::BrowserBuiltin => false,
+        ToolCategory::Requestable => false,
         ToolCategory::CortexOnly => !is_subagent,
         ToolCategory::Actor => has_actor,
         ToolCategory::ActorSubagent => is_subagent,

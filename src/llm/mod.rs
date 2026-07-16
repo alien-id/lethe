@@ -10,5 +10,7 @@ pub mod response_format;
 pub mod truncate;
 
 pub use client::*;
-pub use dialect::{ClaudeDialect, DefaultDialect, PromptDialect, dialect_for_model};
+pub use dialect::{
+    ClaudeDialect, DefaultDialect, ExplicitCacheDialect, PromptDialect, dialect_for_model,
+};
 pub use prompt_builder::PromptBuilder;

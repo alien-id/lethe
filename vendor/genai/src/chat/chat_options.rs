@@ -6,9 +6,12 @@
 //! Note 2: Kept separate from `ChatRequest` for easier reuse and composition.
 
 use crate::Headers;
+use crate::chat::CacheControl;
 use crate::chat::chat_req_response_format::ChatResponseFormat;
+use crate::chat::chat_req_tool_choice::ToolChoice;
 use crate::{Error, Result};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::ops::Deref;
 
 /// Options considered by all `Client::exec_*` chat calls.
@@ -50,6 +53,9 @@ pub struct ChatOptions {
 	/// Note: Additional formats may be added in the future.
 	pub response_format: Option<ChatResponseFormat>,
 
+	/// Tool selection preference, when the provider supports function/tool calling.
+	pub tool_choice: Option<ToolChoice>,
+
 	// -- Reasoning options
 	/// Extract -style reasoning blocks into `ChatResponse.reasoning_content` when present.
 	pub normalize_reasoning_content: Option<bool>,
@@ -68,6 +74,19 @@ pub struct ChatOptions {
 
 	/// Additional HTTP headers to include with the request.
 	pub extra_headers: Option<Headers>,
+
+	// -- Prompt cache options
+	/// Request-level cache control preference.
+	pub cache_control: Option<CacheControl>,
+
+	/// OpenAI prompt cache key.
+	pub prompt_cache_key: Option<String>,
+
+	/// Provider-specific extra request payload merged by the adapter.
+	///
+	/// This is primarily useful for OpenAI-compatible providers that expose
+	/// non-standard request fields.
+	pub extra_body: Option<Value>,
 }
 
 /// Chainable Setters
@@ -126,6 +145,12 @@ impl ChatOptions {
 		self
 	}
 
+	/// Appends one stop sequence.
+	pub fn with_stop_sequence(mut self, value: impl Into<String>) -> Self {
+		self.stop_sequences.push(value.into());
+		self
+	}
+
 	/// Enables or disables normalization of reasoning content (e.g., `<think>...</think>`).
 	pub fn with_normalize_reasoning_content(mut self, value: bool) -> Self {
 		self.normalize_reasoning_content = Some(value);
@@ -135,6 +160,12 @@ impl ChatOptions {
 	/// Sets the response format.
 	pub fn with_response_format(mut self, res_format: impl Into<ChatResponseFormat>) -> Self {
 		self.response_format = Some(res_format.into());
+		self
+	}
+
+	/// Sets the tool selection preference.
+	pub fn with_tool_choice(mut self, tool_choice: ToolChoice) -> Self {
+		self.tool_choice = Some(tool_choice);
 		self
 	}
 
@@ -168,6 +199,24 @@ impl ChatOptions {
 		self
 	}
 
+	/// Sets the request-level cache control preference.
+	pub fn with_cache_control(mut self, value: CacheControl) -> Self {
+		self.cache_control = Some(value);
+		self
+	}
+
+	/// Sets the OpenAI prompt cache key.
+	pub fn with_prompt_cache_key(mut self, key: impl Into<String>) -> Self {
+		self.prompt_cache_key = Some(key.into());
+		self
+	}
+
+	/// Sets provider-specific extra body fields.
+	pub fn with_extra_body(mut self, value: Value) -> Self {
+		self.extra_body = Some(value);
+		self
+	}
+
 	// -- Deprecated
 
 	/// Deprecated: use `with_response_format(ChatResponseFormat::JsonMode)`.
@@ -192,6 +241,8 @@ pub enum ReasoningEffort {
 	Low,
 	Medium,
 	High,
+	XHigh,
+	Max,
 	Budget(u32),
 
 	// Legacy reasoning for <= gpt-5
@@ -206,6 +257,8 @@ impl ReasoningEffort {
 			ReasoningEffort::Low => "low",
 			ReasoningEffort::Medium => "medium",
 			ReasoningEffort::High => "high",
+			ReasoningEffort::XHigh => "xhigh",
+			ReasoningEffort::Max => "max",
 			ReasoningEffort::Budget(_) => "budget",
 			// Legacy
 			ReasoningEffort::Minimal => "minimal",
@@ -219,6 +272,8 @@ impl ReasoningEffort {
 			ReasoningEffort::Low => Some("low"),
 			ReasoningEffort::Medium => Some("medium"),
 			ReasoningEffort::High => Some("high"),
+			ReasoningEffort::XHigh => Some("xhigh"),
+			ReasoningEffort::Max => Some("max"),
 			ReasoningEffort::Budget(_) => None,
 			// Legacy
 			ReasoningEffort::Minimal => Some("minimal"),
@@ -232,6 +287,8 @@ impl ReasoningEffort {
 			"low" => Some(ReasoningEffort::Low),
 			"medium" => Some(ReasoningEffort::Medium),
 			"high" => Some(ReasoningEffort::High),
+			"xhigh" => Some(ReasoningEffort::XHigh),
+			"max" => Some(ReasoningEffort::Max),
 			// legacy
 			"minimal" => Some(ReasoningEffort::Minimal),
 			_ => None,
@@ -258,6 +315,8 @@ impl std::fmt::Display for ReasoningEffort {
 			ReasoningEffort::Low => write!(f, "low"),
 			ReasoningEffort::Medium => write!(f, "medium"),
 			ReasoningEffort::High => write!(f, "high"),
+			ReasoningEffort::XHigh => write!(f, "xhigh"),
+			ReasoningEffort::Max => write!(f, "max"),
 			ReasoningEffort::Budget(n) => write!(f, "{n}"),
 			// Legacy
 			ReasoningEffort::Minimal => write!(f, "minimal"),
@@ -500,6 +559,12 @@ impl ChatOptionsSet<'_, '_> {
 			.or_else(|| self.client.and_then(|client| client.response_format.as_ref()))
 	}
 
+	pub fn tool_choice(&self) -> Option<&ToolChoice> {
+		self.chat
+			.and_then(|chat| chat.tool_choice.as_ref())
+			.or_else(|| self.client.and_then(|client| client.tool_choice.as_ref()))
+	}
+
 	pub fn normalize_reasoning_content(&self) -> Option<bool> {
 		self.chat
 			.and_then(|chat| chat.normalize_reasoning_content)
@@ -535,6 +600,24 @@ impl ChatOptionsSet<'_, '_> {
 		self.chat
 			.and_then(|chat| chat.extra_headers.as_ref())
 			.or_else(|| self.client.and_then(|client| client.extra_headers.as_ref()))
+	}
+
+	pub fn prompt_cache_key(&self) -> Option<&str> {
+		self.chat
+			.and_then(|chat| chat.prompt_cache_key.as_deref())
+			.or_else(|| self.client.and_then(|client| client.prompt_cache_key.as_deref()))
+	}
+
+	pub fn extra_body(&self) -> Option<&Value> {
+		self.chat
+			.and_then(|chat| chat.extra_body.as_ref())
+			.or_else(|| self.client.and_then(|client| client.extra_body.as_ref()))
+	}
+
+	pub fn cache_control(&self) -> Option<&CacheControl> {
+		self.chat
+			.and_then(|chat| chat.cache_control.as_ref())
+			.or_else(|| self.client.and_then(|client| client.cache_control.as_ref()))
 	}
 
 	/// Returns true only if there is a ChatResponseFormat::JsonMode

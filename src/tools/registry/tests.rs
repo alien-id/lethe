@@ -27,7 +27,7 @@ fn exposes_core_tool_specs() {
     let names = registry
         .tools()
         .into_iter()
-        .map(|tool| tool.name)
+        .map(|tool| tool.name.to_string())
         .collect::<Vec<_>>();
     assert!(names.contains(&"read_file".to_string()));
     assert!(names.contains(&"bash".to_string()));
@@ -39,10 +39,7 @@ fn exposes_core_tool_specs() {
     assert!(names.contains(&"note_search".to_string()));
     assert!(names.contains(&"web_search".to_string()));
     assert!(names.contains(&"fetch_webpage".to_string()));
-    assert!(names.contains(&"browser_open".to_string()));
-    assert!(names.contains(&"browser_snapshot".to_string()));
-    assert!(names.contains(&"browser_click".to_string()));
-    assert!(names.contains(&"browser_fill".to_string()));
+    assert!(!names.iter().any(|name| name.starts_with("browser_")));
     assert!(names.contains(&"view_image".to_string()));
     assert!(names.contains(&"todo_update".to_string()));
     assert!(names.contains(&"todo_remind_check".to_string()));
@@ -57,7 +54,7 @@ fn active_tool_specs_start_small_and_expand_on_request() {
     let initial = registry
         .tools_for_active(&active)
         .into_iter()
-        .map(|tool| tool.name)
+        .map(|tool| tool.name.to_string())
         .collect::<Vec<_>>();
     assert!(initial.contains(&"request_tool".to_string()));
     assert!(initial.contains(&"bash".to_string()));
@@ -92,15 +89,14 @@ fn active_tool_specs_start_small_and_expand_on_request() {
         initial.len()
     );
 
-    let active = ["browser_open".to_string(), "fetch_webpage".to_string()]
+    let active = ["fetch_webpage".to_string()]
         .into_iter()
         .collect::<HashSet<_>>();
     let expanded = registry
         .tools_for_active(&active)
         .into_iter()
-        .map(|tool| tool.name)
+        .map(|tool| tool.name.to_string())
         .collect::<Vec<_>>();
-    assert!(expanded.contains(&"browser_open".to_string()));
     assert!(expanded.contains(&"fetch_webpage".to_string()));
 }
 
@@ -149,12 +145,12 @@ fn hosted_tools_replace_local_defs_and_join_requestable_groups() {
 
     let all = registry.tools();
     assert_eq!(
-        all.iter().filter(|tool| tool.name == "todo_list").count(),
+        all.iter().filter(|tool| tool.name.as_str() == "todo_list").count(),
         1,
         "remote todo_list must replace, not duplicate, the local schema"
     );
-    assert!(all.iter().any(|tool| tool.name == "todo_reopen"));
-    assert!(!all.iter().any(|tool| tool.name == "todo_remind_check"));
+    assert!(all.iter().any(|tool| tool.name.as_str() == "todo_reopen"));
+    assert!(!all.iter().any(|tool| tool.name.as_str() == "todo_remind_check"));
     assert_eq!(
         registry.group_siblings("todo_list"),
         vec!["todo_reopen".to_string()]
@@ -233,10 +229,40 @@ fn executes_files_memory_notes_and_shell_tools() {
             .execute("check_command_exists", &json!({"command_name": "ls"}))
             .contains("available")
     );
+    // web_search is an Async executor (blocking HTTP on the async worker
+    // panics the turn), so the sync dispatch path must refuse it cleanly.
+    assert!(
+        registry
+            .execute("web_search", &json!({"query": "rust"}))
+            .contains("requires async tool execution")
+    );
+}
+
+/// Multi-thread flavor on purpose: this is the runtime lethe-mux runs, and the
+/// flavor where async dispatch routes Sync executors through `block_in_place`
+/// (on current-thread test runtimes that guard is skipped). Locks in that a
+/// Sync tool still works through the guarded path.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sync_tools_still_run_through_async_dispatch_on_multi_thread_runtime() {
+    let (_tmp, memory, shell) = registry();
+    let registry = ToolRegistry::new(&memory, memory.workspace_dir(), "/tmp/lethe-cache", &shell);
+    assert_eq!(
+        registry
+            .execute_async("bash", &json!({"command": "echo ok"}))
+            .await,
+        "ok"
+    );
+}
+
+#[tokio::test]
+async fn web_search_dispatches_async_and_reports_missing_key() {
+    let (_tmp, memory, shell) = registry();
+    let registry = ToolRegistry::new(&memory, memory.workspace_dir(), "/tmp/lethe-cache", &shell);
     if !WebTools::is_available() {
         assert!(
             registry
-                .execute("web_search", &json!({"query": "rust"}))
+                .execute_async("web_search", &json!({"query": "rust"}))
+                .await
                 .contains("EXA_API_KEY")
         );
     }
@@ -254,8 +280,7 @@ fn hosted_safe_policy_exposes_memory_but_blocks_local_execution() {
     assert!(ToolPolicy::HostedSafe.allows_builtin("view_image"));
     assert!(!ToolPolicy::HostedSafe.allows_builtin("bash"));
     assert!(!ToolPolicy::HostedSafe.allows_builtin("web_search"));
-    // The built-in browser is NOT a hosted capability — only the vault-sealed
-    // `alien_browser_*` is. It must not resurface under the hosted policy.
+    // The removed standalone browser family must not resurface under policy.
     assert!(!ToolPolicy::HostedSafe.allows_builtin("browser_open"));
     assert!(!ToolPolicy::HostedSafe.allows_builtin("browser_snapshot"));
 
@@ -274,13 +299,12 @@ fn hosted_safe_policy_exposes_memory_but_blocks_local_execution() {
     let names = registry
         .tools()
         .into_iter()
-        .map(|tool| tool.name)
+        .map(|tool| tool.name.to_string())
         .collect::<std::collections::HashSet<_>>();
     assert!(names.contains("memory_read"));
     assert!(names.contains("memory_update"));
     assert!(names.contains("read_file"));
-    // The built-in browser is not a hosted capability — hidden and unavailable
-    // under the hosted policy (hosted browsing is only the vault-sealed browser).
+    // Hosted browsing is exclusively the Alien browser family.
     assert!(!names.contains("browser_open"));
     assert!(!names.contains("bash"));
     assert!(!registry.tool_is_available("bash"));
@@ -288,11 +312,6 @@ fn hosted_safe_policy_exposes_memory_but_blocks_local_execution() {
     assert!(
         registry
             .execute("bash", &json!({"command": "echo forbidden"}))
-            .contains("disabled by the active capability policy")
-    );
-    assert!(
-        registry
-            .execute("browser_open", &json!({"url": "https://example.com"}))
             .contains("disabled by the active capability policy")
     );
 }
@@ -513,7 +532,7 @@ async fn exposes_and_executes_actor_tools_when_context_is_present() {
     let names = registry
         .tools()
         .into_iter()
-        .map(|tool| tool.name)
+        .map(|tool| tool.name.to_string())
         .collect::<Vec<_>>();
     assert!(names.contains(&"spawn_actor".to_string()));
     assert!(names.contains(&"spawn_chain".to_string()));
@@ -611,7 +630,7 @@ fn exposes_and_executes_telegram_tools_when_context_is_present() {
     let names = registry
         .tools()
         .into_iter()
-        .map(|tool| tool.name)
+        .map(|tool| tool.name.to_string())
         .collect::<Vec<_>>();
     assert!(names.contains(&"telegram_send_message".to_string()));
     assert!(names.contains(&"telegram_send_file".to_string()));
@@ -689,7 +708,7 @@ fn client_tool_context_exposes_telegram_tools_as_events() {
     let names = registry
         .tools()
         .into_iter()
-        .map(|tool| tool.name)
+        .map(|tool| tool.name.to_string())
         .collect::<Vec<_>>();
     // Client-only sessions get the transport-neutral chat egress, never the
     // Telegram-branded tool set (a desktop/web user has no Telegram attached).

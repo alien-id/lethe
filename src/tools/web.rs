@@ -1,11 +1,17 @@
 use std::env;
 use std::fs;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use chrono::Local;
-use reqwest::blocking::Client;
+use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+
+/// Total per-request timeout. The old `reqwest::blocking` client defaulted to
+/// 30s; the async client defaults to none, which would let a stuck Exa call
+/// hang the whole turn — so the old bound is kept explicitly.
+const EXA_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Clone, Debug)]
 pub struct WebTools {
@@ -23,7 +29,7 @@ impl WebTools {
         exa_api_key().is_some()
     }
 
-    pub fn web_search(
+    pub async fn web_search(
         &self,
         query: &str,
         num_results: usize,
@@ -55,8 +61,10 @@ impl WebTools {
             .post("https://api.exa.ai/search")
             .header("x-api-key", api_key)
             .header("Content-Type", "application/json")
+            .timeout(EXA_TIMEOUT)
             .json(&payload)
             .send()
+            .await
         {
             Ok(response) => response,
             Err(error) => return error_json(&format!("Request failed: {error}")),
@@ -64,11 +72,11 @@ impl WebTools {
 
         let status = response.status();
         if !status.is_success() {
-            let body = response.text().unwrap_or_default();
+            let body = response.text().await.unwrap_or_default();
             return error_json(&format!("Exa API error: {status} - {}", trim(&body, 200)));
         }
 
-        let data = match response.json::<ExaSearchResponse>() {
+        let data = match response.json::<ExaSearchResponse>().await {
             Ok(data) => data,
             Err(error) => return error_json(&format!("Invalid Exa response: {error}")),
         };
@@ -89,7 +97,7 @@ impl WebTools {
         formatted
     }
 
-    pub fn fetch_webpage(&self, url: &str, max_chars: usize) -> String {
+    pub async fn fetch_webpage(&self, url: &str, max_chars: usize) -> String {
         let Some(api_key) = exa_api_key() else {
             return error_json("Exa API not configured. Set EXA_API_KEY environment variable.");
         };
@@ -101,18 +109,20 @@ impl WebTools {
             .post("https://api.exa.ai/contents")
             .header("x-api-key", api_key)
             .header("Content-Type", "application/json")
+            .timeout(EXA_TIMEOUT)
             .json(&payload)
             .send()
+            .await
         {
             Ok(response) => response,
             Err(error) => return error_json(&format!("Request failed: {error}")),
         };
         let status = response.status();
         if !status.is_success() {
-            let body = response.text().unwrap_or_default();
+            let body = response.text().await.unwrap_or_default();
             return error_json(&format!("Exa API error: {status} - {}", trim(&body, 200)));
         }
-        let data = match response.json::<ExaSearchResponse>() {
+        let data = match response.json::<ExaSearchResponse>().await {
             Ok(data) => data,
             Err(error) => return error_json(&format!("Invalid Exa response: {error}")),
         };
@@ -243,25 +253,46 @@ fn valid_category(category: &str) -> bool {
     )
 }
 
+use std::future::Future;
+use std::pin::Pin;
+
 use serde_json::Value;
 
 use crate::tools::registry::ToolRegistry;
 use crate::tools::registry::args::{bool_arg, string_arg, string_arg_default, usize_arg};
 use crate::tools::spec::{ToolCategory, ToolDef, ToolExecutor, p_bool, p_int, p_str, p_str_req};
 
-fn exec_web_search(registry: &ToolRegistry<'_>, args: &Value) -> String {
-    registry.web.web_search(
-        &string_arg(args, "query"),
-        usize_arg(args, "num_results", 10),
-        bool_arg(args, "include_text", false),
-        &string_arg_default(args, "category", ""),
-    )
+// Async executors, not Sync: a Sync executor runs inline on the tokio worker,
+// and blocking HTTP there panics the turn ("Cannot drop a runtime in a context
+// where blocking is not allowed" — reqwest::blocking's internal runtime).
+
+fn exec_web_search<'a>(
+    registry: &'a ToolRegistry<'a>,
+    args: &'a Value,
+) -> Pin<Box<dyn Future<Output = String> + Send + 'a>> {
+    Box::pin(async move {
+        registry
+            .web
+            .web_search(
+                &string_arg(args, "query"),
+                usize_arg(args, "num_results", 10),
+                bool_arg(args, "include_text", false),
+                &string_arg_default(args, "category", ""),
+            )
+            .await
+    })
 }
 
-fn exec_fetch_webpage(registry: &ToolRegistry<'_>, args: &Value) -> String {
-    registry
-        .web
-        .fetch_webpage(&string_arg(args, "url"), usize_arg(args, "max_chars", 5000))
+fn exec_fetch_webpage<'a>(
+    registry: &'a ToolRegistry<'a>,
+    args: &'a Value,
+) -> Pin<Box<dyn Future<Output = String> + Send + 'a>> {
+    Box::pin(async move {
+        registry
+            .web
+            .fetch_webpage(&string_arg(args, "url"), usize_arg(args, "max_chars", 5000))
+            .await
+    })
 }
 
 pub const TOOL_DEFS: &[ToolDef] = &[
@@ -278,7 +309,7 @@ pub const TOOL_DEFS: &[ToolDef] = &[
             ),
         ],
         category: ToolCategory::Initial,
-        execute: ToolExecutor::Sync(exec_web_search),
+        execute: ToolExecutor::Async(exec_web_search),
     },
     ToolDef {
         name: "fetch_webpage",
@@ -288,7 +319,7 @@ pub const TOOL_DEFS: &[ToolDef] = &[
             p_int("max_chars", "Max characters."),
         ],
         category: ToolCategory::Requestable,
-        execute: ToolExecutor::Sync(exec_fetch_webpage),
+        execute: ToolExecutor::Async(exec_fetch_webpage),
     },
 ];
 
@@ -296,13 +327,13 @@ pub const TOOL_DEFS: &[ToolDef] = &[
 mod tests {
     use super::*;
 
-    #[test]
-    fn no_api_key_returns_structured_error() {
+    #[tokio::test]
+    async fn no_api_key_returns_structured_error() {
         unsafe {
             env::remove_var("EXA_API_KEY");
         }
         let tools = WebTools::new("/tmp/lethe-web-test");
-        let result = tools.web_search("rust", 3, false, "");
+        let result = tools.web_search("rust", 3, false, "").await;
         assert!(result.contains("\"status\": \"error\""));
         assert!(result.contains("EXA_API_KEY"));
     }
@@ -326,8 +357,8 @@ mod tests {
         assert!(!valid_category("bad"));
     }
 
-    #[test]
-    fn fetch_without_api_key_returns_error() {
+    #[tokio::test]
+    async fn fetch_without_api_key_returns_error() {
         unsafe {
             env::remove_var("EXA_API_KEY");
         }
@@ -335,6 +366,7 @@ mod tests {
         assert!(
             tools
                 .fetch_webpage("https://example.com", 100)
+                .await
                 .contains("EXA_API_KEY")
         );
     }

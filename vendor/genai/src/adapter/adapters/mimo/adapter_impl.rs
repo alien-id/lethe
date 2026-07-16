@@ -9,15 +9,18 @@ use reqwest::RequestBuilder;
 
 pub struct MimoAdapter;
 
-pub(in crate::adapter) const MODELS: &[&str] = &["mimo-v2-flash"];
-
 impl MimoAdapter {
 	pub const API_KEY_DEFAULT_ENV_NAME: &str = "MIMO_API_KEY";
 }
 
 impl Adapter for MimoAdapter {
+	const DEFAULT_API_KEY_ENV_NAME: Option<&'static str> = Some(Self::API_KEY_DEFAULT_ENV_NAME);
+
 	fn default_auth() -> AuthData {
-		AuthData::from_env(Self::API_KEY_DEFAULT_ENV_NAME)
+		match Self::DEFAULT_API_KEY_ENV_NAME {
+			Some(env_name) => AuthData::from_env(env_name),
+			None => AuthData::None,
+		}
 	}
 
 	fn default_endpoint() -> Endpoint {
@@ -25,8 +28,8 @@ impl Adapter for MimoAdapter {
 		Endpoint::from_static(BASE_URL)
 	}
 
-	async fn all_model_names(_kind: AdapterKind) -> Result<Vec<String>> {
-		Ok(MODELS.iter().map(|s| s.to_string()).collect())
+	async fn all_model_names(kind: AdapterKind, endpoint: Endpoint, auth: AuthData) -> Result<Vec<String>> {
+		OpenAIAdapter::list_model_names_for_end_target(kind, endpoint, auth).await
 	}
 
 	fn get_service_url(model: &ModelIden, service_type: ServiceType, endpoint: Endpoint) -> Result<String> {

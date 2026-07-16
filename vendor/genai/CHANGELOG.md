@@ -1,4 +1,89 @@
-`.` minor | `-` Fix | `+` Addition | `^` improvement | `!` Change | `*` Refactor
+`.` minor | `-` Fix | `+` Addition | `^` improvement | `!` Change | `>` Refactor
+
+## 2026-06-06 [v0.6.5](https://github.com/jeremychone/rust-genai/compare/v0.6.4...v0.6.5)
+
+- `-` fix: capture OpenAI stream usage tail (PR #242)
+
+## 2026-06-01 [v0.6.4](https://github.com/jeremychone/rust-genai/compare/v0.6.3...v0.6.4)
+
+- `+` NEW PROVIDER: MiniMax ([https://platform.minimax.io/](platform.minimax.io/)) with `MiniMax` or `minimax` prefixes, or `minimax::` namespace.
+- `^` build - reqwest TLS is now selectable via cargo features: `rustls-tls` (default; rustls + aws-lc-rs + OS trust store) and `native-tls`. 
+  - reqwest switches to `default-features = false` with all previously-implicit features pinned explicitly; the default (`rustls-tls`) uses the same crypto backend as before, so HTTPS keeps working out of the box. BYO crypto provider / custom CA / mTLS via `ClientBuilder::with_reqwest`. Enabling both backends at once fails fast with a `compile_error!` instead of silently picking one.
+- `>` Refactored `Antrophic` adapter with `antropic_shared.rs` (internal)
+
+## 2026-05-29 - [v0.6.3](https://github.com/jeremychone/rust-genai/compare/v0.6.2...v0.6.3)
+
+- `^` use adaptive thinking for opus 4.7 (and above)
+
+## 2026-05-27 - [v0.6.2](https://github.com/jeremychone/rust-genai/compare/v0.6.1...v0.6.2)
+
+- `-` fix - openai_resp: tolerate response.completed events without `output` field (PR #236)
+- `^` adapter/openai - Fix ReasoningEffort::Max mapping to 'max' keyword
+
+## 2026-05-24 - [v0.6.1](https://github.com/jeremychone/rust-genai/compare/v0.6.0...v0.6.1)
+
+- `^` openai shared adapter - remove OpenAI only guard on reasoning suffix
+  - now all openai compatible adapters get the reasoning suffix resolved
+
+## 2026-05-22 - [v0.6.0](https://github.com/jeremychone/rust-genai/compare/v0.5.3...v0.6.0)
+
+- API changes:
+  - `+` API NEW - `all_model_names(adapter_kind, provider_config)` - added `ProviderConfig` for model listing (endpoint/auth overrides)
+  - `!` API CHANGE - `all_model_names()` - now live (with AuthResolver support)
+  - `+` API NEW - New `ModelSpec` to define custom endpoint, model, ..
+  - `+` API NEW - add openai resp stateful sessions — `previous_response_id`, `store`, `response_id` (PR #168)
+  - `+` API NEW - Add `ContentPart::ReasoningContent` support
+  - `+` API NEW - expose provider `stop_reason` in chat responses
+  - `+` API NEW - add typed and normalized built-in tools, `ToolName`, `ToolConfig`, `WebSearch`, and related tool support
+  - `+` API NEW - WebSearch builtin tool spport for Anthropic, OpenAI, Gemini
+  - `^` API NEW - chat-level prompt cache `CacheControl` with openai prompt_cache_key Support
+  - `^` API NEW - Add support for `ReasoningEffort::Max` (Anthropic) and `ReasoningEffort::XHigh` (OpenAI)
+  - `^` openai - now support prompt_cache_key in `ChatOptions` (and `prompt_cache_retention` via `CacheControl`)
+  - `!` openai_resp - gate `reasoning.encrypted_content` on `capture_reasoning_content`
+  - `!` openai_resp - make `reasoning.summary` opt-in for `capture_reasoning_content`
+  - `!` gemini - make `thinkingConfig/includeThoughts` opt-in for `capture_reasoning_content`
+  - `!` groq - providers must be addressed via namespaced model (`groq::_model_name`)
+  - `>` AuthData - add `None` variant
+- New Providers:
+    - AWS Bedrock (`bedrock_api` and `bedrock_sigv4` adapters)
+    - `open_router`
+    - `vertex` (with Gemini and Anthropic support)
+    - `github_copilot` (GitHub Models API)
+    - `opencode_go`
+    - `baidu`
+    - `aliyun`
+    - `moonshot`
+    - `aihubmix`
+    - `ollama_cloud` (Ollama Cloud)
+- Other additions & enhancements:
+  - `!` zai - now use `zai_coding` for the plan based (not `coding` anymore)
+  - `^` gemini - use provider-returned `call_id` for tool calls (PR #232)
+  - `+` anthropic - add JSON schema support
+  - `^` perf - enable HTTP optimizations, gzip, `TCP_NODELAY`, and HTTP/2 tuning
+  - `^` ollama - implement native API support (BIG)
+  - `^` openai - route GPT-5 models through the OpenAI Responses API
+  - `^` openai - add request-level prompt cache support and use `instructions` for Responses API system prompts
+  - `^` anthropic - add support for adaptive thinking
+  - `^` anthropic - emit incremental `ToolCallChunk` events during streaming
+- Others:
+  - `^` docs - comprehensive update of LLM API reference, README, and migration guide for v0.6.0
+  - `^` doc - sync llm api reference, spec rules, and tool spec
+  - `+` tests - add yakbak Gemini streaming replay test
+  - `+` tests - add yakbak HTTP record/replay integration test infrastructure
+  - `>` ModelName - add `Static` and `Shared` inner support
+  - `>` adapter - update `Adapter` trait with `DEFAULT_API_KEY_ENV_NAME` and update implementations
+  - `>` openai - relayout adapter implementation and shared code
+  - `>` examples - rename examples
+  - `-` openai_resp - fix buffering of incomplete UTF-8 sequences across stream chunks
+  - `-` openai - capture inline usage from `finish_reason` stream chunks
+  - `-` anthropic - guard against null `tool_call` arguments in request serialization
+  - `-` anthropic - implement missing prompt caching fixes, cache token capture and normalization, TTL support, and per-part cache control support
+  - `-` gemini - support parallel tool calls in streaming adapter
+  - `-` openai - fix streamer to emit delta content from `finish_reason` message
+  - `-` gemini - fix JSON schema compatibility and usage-only stream tail handling
+  - `-` openai - surface SSE error payloads in streaming
+  - `-` openai - fix recursive issue on tool handling
+  - `-` gemini - fix tool serialization to use `functionDeclarations` camelCase
 
 ## 2026-01-31 - [v0.5.3](https://github.com/jeremychone/rust-genai/compare/v0.5.2...v0.5.3)
 
@@ -7,7 +92,6 @@
 - `.` tracing - add traced to web-client for ai response (#132)
 - `-` Fix incorrect empty output from MessageContent::joined_texts for ≥ 2 text parts (fixes #135) (#136) Co-authored-by: Ross MacLeod <rmm+github@z.odi.ac>
 - `.` ChatRole - Add PartialEq / Eq (#131)
-
 
 ## 2026-01-27 - [v0.5.2](https://github.com/jeremychone/rust-genai/compare/v0.5.1...v0.5.2)
 

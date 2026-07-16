@@ -2,7 +2,7 @@ use genai::chat::Tool;
 
 use crate::tools::hosted_plugins::RemoteToolExposure;
 use crate::tools::spec::{ToolCategory, ToolDef};
-use crate::tools::{agent_id, browser, filesystem, image, knowledge_graph, research, shell, web};
+use crate::tools::{agent_id, filesystem, image, knowledge_graph, research, shell, web};
 
 use super::ToolRegistry;
 use super::{actor_specs, builtin_specs, telegram_specs};
@@ -14,7 +14,6 @@ pub fn all_defs() -> impl Iterator<Item = &'static ToolDef> {
         .chain(image::TOOL_DEFS.iter())
         .chain(shell::TOOL_DEFS.iter())
         .chain(web::TOOL_DEFS.iter())
-        .chain(browser::TOOL_DEFS.iter())
         .chain(builtin_specs::TOOL_DEFS.iter())
         .chain(actor_specs::TOOL_DEFS.iter())
         .chain(research::TOOL_DEFS.iter())
@@ -61,13 +60,6 @@ impl<'a> ToolRegistry<'a> {
         }
         match def.category {
             ToolCategory::Initial | ToolCategory::Requestable | ToolCategory::CortexOnly => true,
-            // The built-in browser hides when the vault-sealed browser is active,
-            // so the agent is never offered two competing browsers.
-            ToolCategory::BrowserBuiltin => {
-                !(crate::agent_id::browser_tools_available()
-                    && (self.runtime.policy != super::ToolPolicy::HostedSafe
-                        || self.runtime.agent_id_state_dir.is_some()))
-            }
             ToolCategory::Actor => self.runtime.actor.is_some(),
             ToolCategory::ActorSubagent => self
                 .runtime
@@ -97,7 +89,7 @@ impl<'a> ToolRegistry<'a> {
     pub(super) fn def_is_initial(&self, def: &ToolDef) -> bool {
         match def.category {
             ToolCategory::Initial => true,
-            ToolCategory::Requestable | ToolCategory::BrowserBuiltin => false,
+            ToolCategory::Requestable => false,
             ToolCategory::CortexOnly => !self.is_subagent_context(),
             // Actor-orchestration tools stay discoverable (def_is_visible) but
             // are only loaded up front for actual subagents — the top-level

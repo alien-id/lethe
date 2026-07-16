@@ -2,7 +2,8 @@ use crate::adapter::adapters::support::get_api_key;
 use crate::adapter::cohere::CohereStreamer;
 use crate::adapter::{Adapter, AdapterKind, ServiceType, WebRequestData};
 use crate::chat::{
-	ChatOptionsSet, ChatRequest, ChatResponse, ChatRole, ChatStream, ChatStreamResponse, MessageContent, Usage,
+	ChatOptionsSet, ChatRequest, ChatResponse, ChatRole, ChatStream, ChatStreamResponse, MessageContent, StopReason,
+	Usage,
 };
 use crate::resolver::{AuthData, Endpoint};
 use crate::webc::{WebResponse, WebStream};
@@ -28,17 +29,22 @@ impl CohereAdapter {
 }
 
 impl Adapter for CohereAdapter {
+	const DEFAULT_API_KEY_ENV_NAME: Option<&'static str> = Some(Self::API_KEY_DEFAULT_ENV_NAME);
+
 	fn default_endpoint() -> Endpoint {
 		const BASE_URL: &str = "https://api.cohere.com/v1/";
 		Endpoint::from_static(BASE_URL)
 	}
 
 	fn default_auth() -> AuthData {
-		AuthData::from_env(Self::API_KEY_DEFAULT_ENV_NAME)
+		match Self::DEFAULT_API_KEY_ENV_NAME {
+			Some(env_name) => AuthData::from_env(env_name),
+			None => AuthData::None,
+		}
 	}
 
 	/// Note: For now, it returns the common ones (see above)
-	async fn all_model_names(_kind: AdapterKind) -> Result<Vec<String>> {
+	async fn all_model_names(_kind: AdapterKind, _endpoint: Endpoint, _auth: AuthData) -> Result<Vec<String>> {
 		Ok(MODELS.iter().map(|s| s.to_string()).collect())
 	}
 
@@ -128,6 +134,13 @@ impl Adapter for CohereAdapter {
 		let provider_model_name = None;
 		let provider_model_iden = model_iden.from_optional_name(provider_model_name);
 
+		// -- Get stop_reason
+		let stop_reason = body
+			.x_take::<Option<String>>("finish_reason")
+			.ok()
+			.flatten()
+			.map(StopReason::from);
+
 		// -- Get usage
 		let usage = body.x_take("/meta/tokens").map(Self::into_usage).unwrap_or_default();
 
@@ -146,8 +159,10 @@ impl Adapter for CohereAdapter {
 			reasoning_content: None,
 			model_iden,
 			provider_model_iden,
+			stop_reason,
 			usage,
 			captured_raw_body: None, // Set by the client exec_chat
+			response_id: None,
 		})
 	}
 

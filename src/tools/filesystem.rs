@@ -42,6 +42,22 @@ impl FileTools {
         }
     }
 
+    /// Resolve an existing regular file using this instance's access policy.
+    /// Browser uploads use this seam so hosted form filling can attach a file
+    /// from the tenant workspace without reopening arbitrary host filesystem
+    /// access through a generic browser `--files` flag.
+    pub(crate) fn resolve_existing_file(&self, raw_path: &str) -> Result<PathBuf, String> {
+        let path = self.resolve_path(raw_path)?;
+        if !path.exists() {
+            return Err(format!("File not found: {raw_path}"));
+        }
+        if !path.is_file() {
+            return Err(format!("Not a file: {raw_path}"));
+        }
+        path.canonicalize()
+            .map_err(|error| format!("could not resolve {raw_path}: {error}"))
+    }
+
     pub fn read_file(&self, file_path: &str, offset: usize, limit: usize) -> String {
         match self.try_read_file(file_path, offset, limit) {
             Ok(output) => output,

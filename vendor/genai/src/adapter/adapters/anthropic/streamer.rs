@@ -1,6 +1,7 @@
 use crate::adapter::adapters::support::{StreamerCapturedData, StreamerOptions};
+use crate::adapter::anthropic::parse_cache_creation_details;
 use crate::adapter::inter_stream::{InterStreamEnd, InterStreamEvent};
-use crate::chat::{ChatOptionsSet, ToolCall, Usage};
+use crate::chat::{ChatOptionsSet, PromptTokensDetails, StopReason, ToolCall, Usage};
 use crate::webc::{Event, EventSourceStream};
 use crate::{Error, ModelIden, Result};
 use serde_json::{Map, Value};
@@ -60,6 +61,12 @@ impl futures::Stream for AnthropicStreamer {
 						}
 						"message_delta" => {
 							self.capture_usage(message_type, &message.data)?;
+							// Capture stop_reason from delta (e.g., "end_turn", "max_tokens", "tool_use")
+							if let Ok(data) = self.parse_message_data(&message.data)
+								&& let Ok(reason) = data.x_get::<String>("/delta/stop_reason")
+							{
+								self.captured_data.stop_reason = Some(reason);
+							}
 							continue;
 						}
 						"content_block_start" => {
@@ -73,11 +80,25 @@ impl futures::Stream for AnthropicStreamer {
 								Ok("text") => self.in_progress_block = InProgressBlock::Text,
 								Ok("thinking") => self.in_progress_block = InProgressBlock::Thinking,
 								Ok("tool_use") => {
+									let id: String = data.x_take("/content_block/id")?;
+									let name: String = data.x_take("/content_block/name")?;
+
+									// Emit an initial ToolCallChunk with name and empty args,
+									// matching OpenAI's incremental streaming behaviour.
+									let tc = ToolCall {
+										call_id: id.clone(),
+										fn_name: name.clone(),
+										fn_arguments: Value::String(String::new()),
+										thought_signatures: None,
+									};
+
 									self.in_progress_block = InProgressBlock::ToolUse {
-										id: data.x_take("/content_block/id")?,
-										name: data.x_take("/content_block/name")?,
+										id,
+										name,
 										input: String::new(),
 									};
+
+									return Poll::Ready(Some(Ok(InterStreamEvent::ToolCallChunk(tc))));
 								}
 								Ok(txt) => {
 									tracing::warn!("unhandled content type: {txt}");
@@ -110,9 +131,20 @@ impl futures::Stream for AnthropicStreamer {
 
 									return Poll::Ready(Some(Ok(InterStreamEvent::Chunk(content))));
 								}
-								InProgressBlock::ToolUse { input, .. } => {
-									input.push_str(data.x_get_str("/delta/partial_json")?);
-									continue;
+								InProgressBlock::ToolUse { id, name, input } => {
+									let partial = data.x_get_str("/delta/partial_json")?;
+									input.push_str(partial);
+
+									// Emit incremental ToolCallChunk with accumulated args
+									// (as Value::String, same convention as OpenAI adapter).
+									let tc = ToolCall {
+										call_id: id.clone(),
+										fn_name: name.clone(),
+										fn_arguments: Value::String(input.clone()),
+										thought_signatures: None,
+									};
+
+									return Poll::Ready(Some(Ok(InterStreamEvent::ToolCallChunk(tc))));
 								}
 								InProgressBlock::Thinking => {
 									if let Ok(thinking) = data.x_take::<String>("/delta/thinking") {
@@ -141,7 +173,10 @@ impl futures::Stream for AnthropicStreamer {
 						}
 						"content_block_stop" => {
 							match std::mem::replace(&mut self.in_progress_block, InProgressBlock::Text) {
-								InProgressBlock::ToolUse { id, name, input } => {
+								InProgressBlock::ToolUse { id, name, input } if self.options.capture_tool_calls => {
+									// ToolCallChunks were already emitted incrementally
+									// during content_block_start and content_block_delta.
+									// Here we only finalize capture with parsed arguments.
 									let fn_arguments = if input.is_empty() {
 										Value::Object(Map::new())
 									} else {
@@ -155,15 +190,10 @@ impl futures::Stream for AnthropicStreamer {
 										thought_signatures: None,
 									};
 
-									// Add to the captured_tool_calls if chat options say so
-									if self.options.capture_tool_calls {
-										match self.captured_data.tool_calls {
-											Some(ref mut t) => t.push(tc.clone()),
-											None => self.captured_data.tool_calls = Some(vec![tc.clone()]),
-										}
+									match self.captured_data.tool_calls {
+										Some(ref mut t) => t.push(tc),
+										None => self.captured_data.tool_calls = Some(vec![tc]),
 									}
-
-									return Poll::Ready(Some(Ok(InterStreamEvent::ToolCallChunk(tc))));
 								}
 								_ => {
 									// no-op for remaining block types
@@ -196,10 +226,12 @@ impl futures::Stream for AnthropicStreamer {
 
 							let inter_stream_end = InterStreamEnd {
 								captured_usage,
+								captured_stop_reason: self.captured_data.stop_reason.take().map(StopReason::from),
 								captured_text_content: self.captured_data.content.take(),
 								captured_reasoning_content: self.captured_data.reasoning_content.take(),
 								captured_tool_calls: self.captured_data.tool_calls.take(),
 								captured_thought_signatures: None,
+								captured_response_id: None,
 							};
 
 							// TODO: Need to capture the data as needed
@@ -264,6 +296,39 @@ impl AnthropicStreamer {
 					.completion_tokens
 					.get_or_insert(0);
 				*val += output_tokens;
+			}
+
+			// -- Capture cache tokens (only present in message_start)
+			// NOTE: Anthropic's input_tokens does NOT include cached tokens, so we must add them.
+			// See also: AnthropicAdapter::into_usage() for non-streaming equivalent.
+			if message_type == "message_start" {
+				let cache_creation: i32 = data.x_get("/message/usage/cache_creation_input_tokens").unwrap_or(0);
+				let cache_read: i32 = data.x_get("/message/usage/cache_read_input_tokens").unwrap_or(0);
+
+				// Parse cache_creation breakdown if present (TTL-specific breakdown)
+				// Use x_get with JSON pointer to navigate to /message/usage/cache_creation
+				let cache_creation_details = data
+					.x_get::<Value>("/message/usage/cache_creation")
+					.ok()
+					.as_ref()
+					.and_then(parse_cache_creation_details);
+
+				if cache_creation > 0 || cache_read > 0 || cache_creation_details.is_some() {
+					let usage = self.captured_data.usage.get_or_insert(Usage::default());
+
+					// Add cache tokens to prompt_tokens (same as into_usage does)
+					if let Some(ref mut pt) = usage.prompt_tokens {
+						*pt += cache_creation + cache_read;
+					}
+
+					// Set prompt_tokens_details (match into_usage behavior: always Some(value))
+					usage.prompt_tokens_details = Some(PromptTokensDetails {
+						cache_creation_tokens: Some(cache_creation),
+						cache_creation_details,
+						cached_tokens: Some(cache_read),
+						audio_tokens: None,
+					});
+				}
 			}
 		}
 

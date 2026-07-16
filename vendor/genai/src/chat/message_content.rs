@@ -1,5 +1,5 @@
 /// Note: MessageContent is used for ChatRequest and ChatResponse.
-use crate::chat::{Binary, ContentPart, ToolCall, ToolResponse};
+use crate::chat::{Binary, ContentPart, CustomPart, ToolCall, ToolResponse};
 use serde::{Deserialize, Serialize};
 
 /// Message content container used in ChatRequest and ChatResponse.
@@ -30,6 +30,13 @@ impl MessageContent {
 	pub fn from_tool_calls(tool_calls: Vec<ToolCall>) -> Self {
 		Self {
 			parts: tool_calls.into_iter().map(ContentPart::ToolCall).collect(),
+		}
+	}
+
+	/// Build from the provided tool responses.
+	pub fn from_tool_responses(tool_responses: Vec<ToolResponse>) -> Self {
+		Self {
+			parts: tool_responses.into_iter().map(ContentPart::ToolResponse).collect(),
 		}
 	}
 }
@@ -138,6 +145,14 @@ impl FromIterator<ContentPart> for MessageContent {
 
 /// Getters
 impl MessageContent {
+	pub fn iter(&self) -> Iter<'_, ContentPart> {
+		self.parts.iter()
+	}
+
+	pub fn iter_mut(&mut self) -> IterMut<'_, ContentPart> {
+		self.parts.iter_mut()
+	}
+
 	/// Return all parts.
 	pub fn parts(&self) -> &Vec<ContentPart> {
 		&self.parts
@@ -164,6 +179,16 @@ impl MessageContent {
 
 	pub fn into_binaries(self) -> Vec<Binary> {
 		self.parts.into_iter().filter_map(|p| p.into_binary()).collect()
+	}
+
+	/// Return references to all ThoughtSignature parts as &str.
+	pub fn thought_signatures(&self) -> Vec<&str> {
+		self.parts.iter().filter_map(|p| p.as_thought_signature()).collect()
+	}
+
+	/// Consume and return all ThoughtSignature parts as owned Strings.
+	pub fn into_thought_signatures(self) -> Vec<String> {
+		self.parts.into_iter().filter_map(|p| p.into_thought_signature()).collect()
 	}
 
 	/// Return references to all ToolCall parts.
@@ -210,6 +235,16 @@ impl MessageContent {
 			.collect()
 	}
 
+	/// Return references to all custom parts.
+	pub fn custom_parts(&self) -> Vec<&CustomPart> {
+		self.parts.iter().filter_map(|p| p.as_custom()).collect()
+	}
+
+	/// Consume and return all custom parts.
+	pub fn into_custom_parts(self) -> Vec<CustomPart> {
+		self.parts.into_iter().filter_map(|p| p.into_custom()).collect()
+	}
+
 	/// True if there are no parts.
 	pub fn is_empty(&self) -> bool {
 		self.parts.is_empty()
@@ -218,6 +253,26 @@ impl MessageContent {
 	/// Number of parts.
 	pub fn len(&self) -> usize {
 		self.parts.len()
+	}
+
+	/// Return references to all ReasoningContent parts as &str.
+	pub fn reasoning_contents(&self) -> Vec<&str> {
+		self.parts.iter().filter_map(|p| p.as_reasoning_content()).collect()
+	}
+
+	/// Consume and return all ReasoningContent parts as owned Strings.
+	pub fn into_reasoning_contents(self) -> Vec<String> {
+		self.parts.into_iter().filter_map(|p| p.into_reasoning_content()).collect()
+	}
+
+	/// Join all reasoning content parts with a newline separator.
+	/// Returns None if there are no reasoning content parts.
+	pub fn joined_reasoning_content(&self) -> Option<String> {
+		let parts = self.reasoning_contents();
+		if parts.is_empty() {
+			return None;
+		}
+		Some(parts.join("\n"))
 	}
 
 	/// True if empty, or if all parts are text whose content is empty or whitespace.
@@ -247,6 +302,38 @@ impl MessageContent {
 	pub fn into_first_text(self) -> Option<String> {
 		let first_text_part = self.parts.into_iter().find(|p| p.is_text())?;
 		first_text_part.into_text()
+	}
+
+	/// Return the first reasoning content part, if any.
+	///
+	/// Does not concatenate multiple reasoning content parts.
+	pub fn first_reasoning_content(&self) -> Option<&str> {
+		let first_reasoning_part = self.parts.iter().find(|p| p.is_reasoning_content())?;
+		first_reasoning_part.as_reasoning_content()
+	}
+
+	/// Consume and return the first reasoning content part as a String, if any.
+	///
+	/// Does not concatenate multiple reasoning content parts.
+	pub fn into_first_reasoning_content(self) -> Option<String> {
+		let first_reasoning_part = self.parts.into_iter().find(|p| p.is_reasoning_content())?;
+		first_reasoning_part.into_reasoning_content()
+	}
+
+	/// Return the first thought signature part, if any.
+	///
+	/// Does not concatenate multiple thought signature parts.
+	pub fn first_thought_signature(&self) -> Option<&str> {
+		let first_thought_signature_part = self.parts.iter().find(|p| p.is_thought_signature())?;
+		first_thought_signature_part.as_thought_signature()
+	}
+
+	/// Consume and return the first thought signature part as a String, if any.
+	///
+	/// Does not concatenate multiple thought signature parts.
+	pub fn into_first_thought_signature(self) -> Option<String> {
+		let first_thought_signature_part = self.parts.into_iter().find(|p| p.is_thought_signature())?;
+		first_thought_signature_part.into_thought_signature()
 	}
 
 	/// Join all text parts, separating segments with a blank line.
@@ -298,6 +385,11 @@ impl MessageContent {
 		self.parts.iter().any(|p| p.is_text())
 	}
 
+	/// True if at least one part is binary.
+	pub fn contains_binary(&self) -> bool {
+		self.parts.iter().any(|p| p.is_binary())
+	}
+
 	/// True if at least one part is a ToolCall.
 	pub fn contains_tool_call(&self) -> bool {
 		self.parts.iter().any(|p| p.is_tool_call())
@@ -306,6 +398,21 @@ impl MessageContent {
 	/// True if at least one part is a ToolResponse.
 	pub fn contains_tool_response(&self) -> bool {
 		self.parts.iter().any(|p| p.is_tool_response())
+	}
+
+	/// True if at least one part is a ThoughtSignature.
+	pub fn contains_thought_signature(&self) -> bool {
+		self.parts.iter().any(|p| p.is_thought_signature())
+	}
+
+	/// True if at least one part is ReasoningContent.
+	pub fn contains_reasoning_content(&self) -> bool {
+		self.parts.iter().any(|p| p.is_reasoning_content())
+	}
+
+	/// True if at least one part is Custom.
+	pub fn contains_custom(&self) -> bool {
+		self.parts.iter().any(|p| p.is_custom())
 	}
 }
 
@@ -343,10 +450,26 @@ impl From<Vec<ToolCall>> for MessageContent {
 	}
 }
 
+impl From<ToolCall> for MessageContent {
+	fn from(tool_call: ToolCall) -> Self {
+		Self {
+			parts: vec![ContentPart::ToolCall(tool_call)],
+		}
+	}
+}
+
 impl From<ToolResponse> for MessageContent {
 	fn from(tool_response: ToolResponse) -> Self {
 		Self {
 			parts: vec![ContentPart::ToolResponse(tool_response)],
+		}
+	}
+}
+
+impl From<Vec<ToolResponse>> for MessageContent {
+	fn from(tool_responses: Vec<ToolResponse>) -> Self {
+		Self {
+			parts: tool_responses.into_iter().map(ContentPart::ToolResponse).collect(),
 		}
 	}
 }
@@ -361,6 +484,14 @@ impl From<Binary> for MessageContent {
 	fn from(bin: Binary) -> Self {
 		Self {
 			parts: vec![bin.into()],
+		}
+	}
+}
+
+impl From<CustomPart> for MessageContent {
+	fn from(custom_part: CustomPart) -> Self {
+		Self {
+			parts: vec![ContentPart::Custom(custom_part)],
 		}
 	}
 }
@@ -384,7 +515,10 @@ mod tests {
 
 	#[test]
 	fn test_message_content_joined_texts_single_part() {
-		assert_eq!(MessageContent::from_parts(vec![ContentPart::Text("Hello".to_string())]).joined_texts(), Some("Hello".to_string()));
+		assert_eq!(
+			MessageContent::from_parts(vec![ContentPart::Text("Hello".to_string())]).joined_texts(),
+			Some("Hello".to_string())
+		);
 	}
 
 	#[test]
@@ -393,7 +527,8 @@ mod tests {
 			MessageContent::from_parts(vec![
 				ContentPart::Text("Hello".to_string()),
 				ContentPart::Text("World".to_string()),
-			]).joined_texts(),
+			])
+			.joined_texts(),
 			Some("Hello\n\nWorld".to_string())
 		);
 	}
@@ -405,7 +540,10 @@ mod tests {
 
 	#[test]
 	fn test_message_content_into_joined_texts_single_part() {
-		assert_eq!(MessageContent::from_parts(vec![ContentPart::Text("Hello".to_string())]).into_joined_texts(), Some("Hello".to_string()));
+		assert_eq!(
+			MessageContent::from_parts(vec![ContentPart::Text("Hello".to_string())]).into_joined_texts(),
+			Some("Hello".to_string())
+		);
 	}
 
 	#[test]
@@ -414,7 +552,8 @@ mod tests {
 			MessageContent::from_parts(vec![
 				ContentPart::Text("Hello".to_string()),
 				ContentPart::Text("World".to_string()),
-			]).into_joined_texts(),
+			])
+			.into_joined_texts(),
 			Some("Hello\n\nWorld".to_string())
 		);
 	}

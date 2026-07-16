@@ -18,6 +18,18 @@ pub struct ChatRequest {
 
 	/// Optional tool definitions available to the model.
 	pub tools: Option<Vec<Tool>>,
+
+	/// Previous response ID for stateful sessions (OpenAI Responses API).
+	/// When set, the server uses cached conversation state — only new messages need to be sent.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub previous_response_id: Option<String>,
+
+	/// Whether to store the response for stateful sessions (OpenAI Responses API).
+	/// When true, the response_id can be used as previous_response_id in future calls.
+	/// Default: None → false (always opt-in, never implicit). Must be explicitly set to
+	/// Some(true) when using stateful sessions with previous_response_id.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub store: Option<bool>,
 }
 
 /// Constructors
@@ -28,6 +40,8 @@ impl ChatRequest {
 			messages,
 			system: None,
 			tools: None,
+			previous_response_id: None,
+			store: None,
 		}
 	}
 
@@ -37,6 +51,8 @@ impl ChatRequest {
 			system: Some(content.into()),
 			messages: Vec::new(),
 			tools: None,
+			previous_response_id: None,
+			store: None,
 		}
 	}
 
@@ -46,6 +62,8 @@ impl ChatRequest {
 			system: None,
 			messages: vec![ChatMessage::user(content.into())],
 			tools: None,
+			previous_response_id: None,
+			store: None,
 		}
 	}
 
@@ -55,6 +73,8 @@ impl ChatRequest {
 			system: None,
 			messages,
 			tools: None,
+			previous_response_id: None,
+			store: None,
 		}
 	}
 }
@@ -90,6 +110,18 @@ impl ChatRequest {
 		I::Item: Into<Tool>,
 	{
 		self.tools = Some(tools.into_iter().map(Into::into).collect());
+		self
+	}
+
+	/// Set the previous response ID for stateful sessions.
+	pub fn with_previous_response_id(mut self, previous_response_id: impl Into<String>) -> Self {
+		self.previous_response_id = Some(previous_response_id.into());
+		self
+	}
+
+	/// Set whether to store the response for stateful sessions.
+	pub fn with_store(mut self, store: bool) -> Self {
+		self.store = Some(store);
 		self
 	}
 
@@ -153,6 +185,18 @@ impl ChatRequest {
 	#[deprecated(note = "use join_systems()")]
 	pub fn combine_systems(&self) -> Option<String> {
 		self.join_systems()
+	}
+}
+
+impl From<Vec<ChatMessage>> for ChatRequest {
+	fn from(messages: Vec<ChatMessage>) -> Self {
+		Self {
+			system: None,
+			messages,
+			tools: None,
+			previous_response_id: None,
+			store: None,
+		}
 	}
 }
 

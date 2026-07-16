@@ -86,7 +86,7 @@ Core runtime pieces:
 | Area | Rust modules | Responsibility |
 |------|--------------|----------------|
 | Agent/cortex | `src/agent.rs` | Prompt assembly, LLM calls, tool loop, and actor turn execution. |
-| LLM routing | `src/llm/` | `genai` client, OAuth (ChatGPT Plus/Pro, Claude Pro/Max) and API-key auth, OpenRouter prompt-cache forwarding via vendored genai patch, model metadata. |
+| LLM routing | `src/llm/` | `genai` client, OAuth (ChatGPT Plus/Pro, Claude Pro/Max) and API-key auth, per-model prompt-cache dialects, OpenRouter prompt-cache forwarding via vendored genai patch, model metadata. |
 | Memory | `src/memory/` | Markdown memory blocks, SQLite-vec recall tables (`memory`, `message_history`, plus their `*_vec` virtual siblings), SQLite todos. |
 | Recall | `src/hippocampus.rs` | Hybrid lexical/vector recall over notes, archival memories, and conversation history. |
 | Actors | `src/actor.rs`, `src/actor/` | Resident Kameo actors, supervisor-owned state, mailbox/event routing, autonomous subagent wakeups, persistent DMN, SQLite-backed actor snapshots that survive restarts. |
@@ -120,11 +120,9 @@ cargo test
 cargo build --release
 ```
 
-The built-in `browser_*` tools shell out to the external
-[`agent-browser`](https://www.npmjs.com/package/agent-browser) CLI
-(`npm install -g agent-browser`). When the agent-id integration's vault-sealed
-browser is active it takes over instead (and the built-in `browser_*` tools are
-hidden, so there's only ever one browser) — see [Alien agent-id](#alien-agent-id).
+Browser automation uses the vault-sealed Alien Browser exclusively; the former
+standalone `agent-browser`/`browser_*` integration has been removed. See
+[Alien agent-id](#alien-agent-id).
 
 ## Running
 
@@ -209,12 +207,14 @@ Lethe routes chat through `genai`. The runtime supports both API-key and subscri
 
 ### Prompt caching
 
-Lethe stamps cache breakpoints on the system prompt (1h-TTL persistent prefix + 5min-TTL ephemeral tail) and forwards them through to:
+Lethe stamps cache breakpoints on the system prompt — a 1h-TTL prefix (identity, persona, instructions) plus a 5min-TTL tail (clock, memory state, recall) — but only for models that need an explicit breakpoint. Which marker a model gets is decided by its dialect in [`src/llm/dialect.rs`](src/llm/dialect.rs):
 
-- **Anthropic direct** and **Anthropic OAuth** — cache_control is emitted on system blocks.
-- **OpenRouter** — cache_control is emitted on system content parts, which OpenRouter forwards to upstream providers that support explicit caching (Anthropic, Qwen, Gemini explicit). Providers with automatic prefix caching (OpenAI, Grok, Moonshot/Kimi, Groq, DeepSeek, Gemini implicit) ignore the field but benefit from the stable structured shape.
+- **Anthropic direct** and **Anthropic OAuth** — emitted on system blocks, 1h + 5min.
+- **OpenRouter → Anthropic** — emitted on system content parts. OpenRouter relays `cache_control` to the upstream vendor (converting between the Anthropic and OpenAI marker formats), and Anthropic is the only vendor accepting the extended `ttl: "1h"`.
+- **OpenRouter → Gemini / Qwen** — explicit breakpoints too, but 5min only: the 1h TTL is Anthropic-only.
+- **Everything else** — no marker. OpenAI, Grok, Moonshot/Kimi, Groq, DeepSeek and Z.AI/GLM cache automatically, so a breakpoint buys nothing.
 
-Both `genai`'s native OpenAI adapter and our vendored fork now carry the patch — see [`vendor/genai/LETHE_FORK.md`](vendor/genai/LETHE_FORK.md) for the patch surface.
+See [OpenRouter's prompt-caching docs](https://openrouter.ai/docs/features/prompt-caching) for the per-vendor rules. Upstream `genai` only supports request-level `cache_control` (OpenAI's native `prompt_cache_retention`), which does not cover the OpenRouter route — forwarding it per-message is the one patch our vendored fork carries. See [`vendor/genai/LETHE_FORK.md`](vendor/genai/LETHE_FORK.md).
 
 ## Configuration
 
@@ -410,12 +410,14 @@ root (the container is the isolation boundary), set
 stays on. Headed login (`alien_browser_login`) needs a display and is therefore
 unavailable on a headless server — there, use the headless flow below.
 
-**Headless login flow:** add a `login` credential *with a `login_url`* (via
-`vault_add`), then `alien_browser_auto_login` to sign in and seal a reusable
-browser-profile, then `alien_browser_open` / `_act` to drive it. `open` before a
-profile exists reports "no browser-profile" — that means run `auto_login` first.
-(A site with an aggressive anti-automation wall may block headless login; that
-needs a one-time headed sign-in on a machine with a display.)
+**Headless flow:** `alien_browser_open` automatically creates the shared `main`
+profile as an anonymous L0 cookie jar, so public pages work immediately. For a
+site that needs an account, add a `login` credential *with a `login_url`* (via
+`vault_add`), then use `alien_browser_auto_login` to sign in and reseal that
+profile. Inspect forms with `alien_browser_inspect_form` and fill ordinary fields,
+selections, checks, and workspace file uploads in one verified
+`alien_browser_fill_form` call. (A site with an aggressive anti-automation wall
+may still need a one-time headed sign-in on a machine with a display.)
 
 | env var | default | meaning |
 |---|---|---|

@@ -43,6 +43,9 @@ pub enum Error {
 	#[display("Failed to parse service tier. Actual: '{actual}'")]
 	ServiceTierParsing { actual: String },
 
+	#[display("Failed to parse prompt cache retention. Actual: '{actual}'")]
+	PromptCacheRetentionParsing { actual: String },
+
 	// -- Chat Output
 	#[display("No chat response from model '{model_iden}'")]
 	NoChatResponse { model_iden: ModelIden },
@@ -132,6 +135,20 @@ Cause:\n{cause}
 	// -- Adapter Support
 	#[display("Adapter '{adapter_kind}' does not support feature '{feature}'")]
 	AdapterNotSupported { adapter_kind: AdapterKind, feature: String },
+
+	#[display(
+		"Client is bound to adapter '{bound}' but model '{model}' resolved to adapter '{requested}'. \
+A Client configured with `with_adapter_kind` targets a single provider — its \
+AuthResolver and ServiceTargetResolver are gated on that adapter, so routing \
+through a different one would silently drop auth and the configured endpoint. \
+Drop the `::` namespace prefix or `ModelSpec::Iden`, or build a Client without \
+`with_adapter_kind` for per-call routing."
+	)]
+	AdapterKindMismatch {
+		bound: AdapterKind,
+		requested: AdapterKind,
+		model: String,
+	},
 
 	#[display("Internal error: {_0}")]
 	Internal(String),

@@ -16,14 +16,6 @@ pub enum ToolCategory {
     CortexOnly,
     /// Not in the initial set; loaded via `request_tool`.
     Requestable,
-    /// Lethe's built-in generic browser (`browser_*`, backed by the external
-    /// `agent-browser` CLI). Requestable, EXCEPT it's hidden when the agent-id
-    /// vault-sealed browser is active — that one is a superset (its
-    /// `alien_browser_act` covers snapshot/click/type/… and it adds vault-sealed
-    /// credential injection), so exposing both would be two competing,
-    /// session-isolated browsers. One browser at a time: the vault-sealed one when
-    /// agent-id is on, this built-in one otherwise.
-    BrowserBuiltin,
     /// Initial when an actor runtime context is attached.
     Actor,
     /// Like `Actor`, but only when the actor is a subagent.
@@ -56,6 +48,8 @@ pub enum ParamKind {
     /// Free-form JSON object (schema allows arbitrary keys). Used for flag
     /// pass-through params like `alien_browser_act.params`.
     Object,
+    /// Strict, nested schema for Alien Browser's single-call form executor.
+    FormPlan,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -68,6 +62,14 @@ pub struct ParamSpec {
 
 /// Per-tool executor stored in each [`ToolDef`]. Sync tools run inline; async
 /// tools return a boxed future awaited by `ToolRegistry::execute_async`.
+///
+/// A `Sync` executor runs directly on the tokio worker thread that dispatches
+/// the turn, so it must not perform blocking I/O. In particular
+/// `reqwest::blocking` is a turn-killing panic there ("Cannot drop a runtime
+/// in a context where blocking is not allowed" — it owns an internal runtime
+/// that cannot be dropped in async context). Anything that talks HTTP belongs
+/// in an `Async` executor with the async `reqwest::Client`. Fast local work
+/// (memory DB reads, small file I/O) is fine as `Sync`.
 pub type SyncExecutor = fn(&ToolRegistry<'_>, &Value) -> String;
 pub type AsyncExecutor = for<'a> fn(
     &'a ToolRegistry<'a>,
@@ -143,6 +145,52 @@ fn param_schema(param: &ParamSpec) -> Value {
             "description": param.description,
             "additionalProperties": true,
         }),
+        ParamKind::FormPlan => json!({
+            "type": "object",
+            "description": param.description,
+            "properties": {
+                "fields": {
+                    "type": "array", "maxItems": 50,
+                    "items": {
+                        "type": "object",
+                        "properties": {"ref": {"type": "string"}, "value": {"type": "string"}},
+                        "required": ["ref", "value"], "additionalProperties": false
+                    }
+                },
+                "checks": {
+                    "type": "array", "maxItems": 50,
+                    "items": {
+                        "type": "object",
+                        "properties": {"ref": {"type": "string"}, "checked": {"type": "boolean"}},
+                        "required": ["ref", "checked"], "additionalProperties": false
+                    }
+                },
+                "selects": {
+                    "type": "array", "maxItems": 50,
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "ref": {"type": "string"},
+                            "values": {"type": "array", "items": {"type": "string"}, "minItems": 1}
+                        },
+                        "required": ["ref", "values"], "additionalProperties": false
+                    }
+                },
+                "uploads": {
+                    "type": "array", "maxItems": 50,
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "ref": {"type": "string"},
+                            "files": {"type": "array", "items": {"type": "string"}, "minItems": 1}
+                        },
+                        "required": ["ref", "files"], "additionalProperties": false
+                    }
+                },
+                "submit": {"type": "string", "description": "Optional submit-button ref; omitted means fill without submitting."}
+            },
+            "additionalProperties": false,
+        }),
     }
 }
 
@@ -197,6 +245,15 @@ pub const fn p_obj(name: &'static str, description: &'static str) -> ParamSpec {
         kind: ParamKind::Object,
         description,
         required: false,
+    }
+}
+
+pub const fn p_form_plan_req(name: &'static str, description: &'static str) -> ParamSpec {
+    ParamSpec {
+        name,
+        kind: ParamKind::FormPlan,
+        description,
+        required: true,
     }
 }
 

@@ -911,7 +911,7 @@ async fn main() -> Result<()> {
         Command::Memory { command } => h::memory_command(command).await,
         Command::Fs { command } => h::fs_command(command),
         Command::Sh { command } => h::sh_command(command),
-        Command::Web { command } => h::web_command(command),
+        Command::Web { command } => h::web_command(command).await,
         Command::Transcribe {
             file_path,
             mime_type,

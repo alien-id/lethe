@@ -21,8 +21,17 @@ pub struct ChatMessage {
 	pub options: Option<MessageOptions>,
 }
 
-/// Constructors
+// region:    --- Constructors
 impl ChatMessage {
+	/// Constructs a message for the provided role.
+	pub fn new(role: ChatRole, content: impl Into<MessageContent>) -> Self {
+		Self {
+			role,
+			content: content.into(),
+			options: None,
+		}
+	}
+
 	/// Constructs a system message.
 	pub fn system(content: impl Into<MessageContent>) -> Self {
 		Self {
@@ -49,9 +58,19 @@ impl ChatMessage {
 			options: None,
 		}
 	}
-}
 
-/// Computed accessors
+	/// Constructs a tool message.
+	pub fn tool(content: impl Into<MessageContent>) -> Self {
+		Self {
+			role: ChatRole::Tool,
+			content: content.into(),
+			options: None,
+		}
+	}
+}
+// endregion: --- Constructors
+
+// region:    --- Accessors
 impl ChatMessage {
 	/// Returns an approximate in-memory size of this `ChatMessage`, in bytes,
 	/// computed as the size of the content plus.
@@ -60,11 +79,22 @@ impl ChatMessage {
 		self.content.size()
 	}
 }
+// endregion: --- Accessors
 
+// region:    --- Builders
 impl ChatMessage {
 	/// Attaches options to this message.
 	pub fn with_options(mut self, options: impl Into<MessageOptions>) -> Self {
 		self.options = Some(options.into());
+		self
+	}
+
+	/// Attach reasoning content to this message as a `ContentPart::ReasoningContent` part.
+	/// This is used for round-tripping assistant reasoning (e.g., DeepSeek, Kimi).
+	pub fn with_reasoning_content(mut self, reasoning: Option<String>) -> Self {
+		if let Some(reasoning) = reasoning {
+			self.content.push(ContentPart::ReasoningContent(reasoning));
+		}
 		self
 	}
 
@@ -78,9 +108,11 @@ impl ChatMessage {
 		ChatMessage::assistant(MessageContent::from_parts(parts))
 	}
 }
+// endregion: --- Builders
+
 // region:    --- MessageOptions
 
-#[derive(Debug, Clone, Serialize, Deserialize, From)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, From)]
 /// Per-message options (e.g., cache control).
 pub struct MessageOptions {
 	#[from]
@@ -88,22 +120,50 @@ pub struct MessageOptions {
 	pub cache_control: Option<CacheControl>,
 }
 
-/// Cache control
+impl MessageOptions {
+	pub fn with_cache_control(mut self, cache_control: impl Into<CacheControl>) -> Self {
+		self.cache_control = Some(cache_control.into());
+		self
+	}
+}
+
+/// Cache control for prompt caching.
 ///
 /// Notes:
-/// - Currently used for Anthropic only.
+/// - This is the unified cache policy abstraction used at both chat-request and message level.
 /// - Anthropic applies cache_control at the content-part level; genai exposes it at the
 ///   ChatMessage level and maps it appropriately.
-/// - OpenAI ignores it; Gemini uses a separate API, so it is not supported there yet.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// - OpenAI currently uses request-level mappings for a subset of variants and ignores
+///   unsupported message-level cache control.
+/// - Different providers support different variants and scopes.
+///
+/// ## TTL Ordering Constraint (Anthropic)
+///
+/// When mixing different TTLs in the same request, cache entries with longer TTL
+/// must appear **before** shorter TTLs. That is, `Ephemeral1h` entries must appear
+/// before any `Ephemeral`, `Memory`, or `Ephemeral5m` entries in the message sequence.
+///
+/// Violating this constraint may cause the API to reject the request or behave unexpectedly.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum CacheControl {
-	/// Default ephemeral cache (5 minute TTL on Anthropic).
+	/// Default ephemeral cache (5 minutes TTL).
 	Ephemeral,
-	/// Lethe fork extension: 1 hour TTL ephemeral cache. Translates to
-	/// Anthropic's `{"type": "ephemeral", "ttl": "1h"}`. Use for the
-	/// long-stable prefix (identity, persona, instructions) so it survives
-	/// the gap between user replies on an always-on assistant.
-	Persistent,
+	/// Memory cache.
+	///
+	/// Note: On providers without a distinct ephemeral default, this may map to the
+	/// provider's memory-oriented request cache mode.
+	Memory,
+	/// Explicit 5-minute TTL cache.
+	Ephemeral5m,
+	/// Extended 1-hour TTL cache.
+	///
+	/// **Important:** When mixing TTLs, 1-hour cache entries must appear before
+	/// any 5-minute cache entries in the request.
+	///
+	/// Note: Costs 2x base input token price vs 1.25x for 5m.
+	Ephemeral1h,
+	/// Extended 24-hour TTL cache.
+	Ephemeral24h,
 }
 
 impl From<CacheControl> for MessageOptions {
@@ -115,6 +175,8 @@ impl From<CacheControl> for MessageOptions {
 }
 // endregion: --- MessageOptions
 
+// region:    --- ChatRole
+
 /// Chat roles recognized across providers.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, derive_more::Display)]
 #[allow(missing_docs)]
@@ -124,6 +186,8 @@ pub enum ChatRole {
 	Assistant,
 	Tool,
 }
+
+// endregion: --- ChatRole
 
 // region:    --- Froms
 
@@ -147,11 +211,13 @@ impl From<Vec<ToolCall>> for ChatMessage {
 
 impl From<ToolResponse> for ChatMessage {
 	fn from(value: ToolResponse) -> Self {
-		Self {
-			role: ChatRole::Tool,
-			content: MessageContent::from(value),
-			options: None,
-		}
+		ChatMessage::tool(value)
+	}
+}
+
+impl From<Vec<ToolResponse>> for ChatMessage {
+	fn from(responses: Vec<ToolResponse>) -> Self {
+		ChatMessage::tool(MessageContent::from(responses))
 	}
 }
 

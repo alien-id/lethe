@@ -1,3 +1,4 @@
+use crate::adapter::AdapterKind;
 use crate::chat::ChatOptions;
 use crate::resolver::{
 	AuthResolver, IntoAuthResolverFn, IntoModelMapperFn, IntoServiceTargetResolverFn, ModelMapper,
@@ -94,6 +95,19 @@ impl ClientBuilder {
 		client_config.model_mapper = Some(model_mapper);
 		self
 	}
+
+	/// Bind the Client to a single [`AdapterKind`] (creates `ClientConfig` if absent).
+	///
+	/// See [`ClientConfig::with_adapter_kind`] for semantics. Short version:
+	/// a Client whose `AuthResolver` / `ServiceTargetResolver` are gated on an
+	/// adapter is already physically single-provider; this makes that
+	/// constraint explicit and drives routing directly instead of inferring
+	/// the adapter from the model name on every call.
+	pub fn with_adapter_kind(mut self, adapter_kind: AdapterKind) -> Self {
+		let client_config = self.config.get_or_insert_with(ClientConfig::default);
+		client_config.adapter_kind = Some(adapter_kind);
+		self
+	}
 }
 
 impl ClientBuilder {
@@ -112,8 +126,12 @@ impl ClientBuilder {
 			let reqwest_client = builder.build().expect("Failed to build reqwest client");
 			WebClient::from_reqwest_client(reqwest_client)
 		} else {
-			// Use default WebClient
-			WebClient::default()
+			// Use default WebClient with performance optimizations
+			let default_config = super::web_config::WebConfig::default();
+			let mut builder = reqwest::Client::builder();
+			builder = default_config.apply_to_builder(builder);
+			let reqwest_client = builder.build().expect("Failed to build reqwest client");
+			WebClient::from_reqwest_client(reqwest_client)
 		};
 
 		let inner = super::ClientInner { web_client, config };

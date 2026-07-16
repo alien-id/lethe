@@ -1,19 +1,12 @@
 //! Live browser viewport relay.
 //!
 //! Bridges the authenticated `/browser/stream` WebSocket (served by the api
-//! module) to whichever in-container browser stream server is live. Two
-//! sources exist:
-//!
-//!  - `alien` — the agent-id-browser session daemon (vault-sealed patchright
+//! module) to the live Alien Browser session daemon (vault-sealed patchright
 //!    browser). Discovery: `<agent-id state dir>/browser-sessions/*.json`
 //!    entries carrying `streamPort` + `streamToken` (written by
 //!    agent-id-browser >= 7.3, alongside the daemon's own `port`/`token`).
 //!    Dialed as `ws://127.0.0.1:{streamPort}/?token={streamToken}`.
-//!  - `plain` — the public agent-browser daemon's built-in stream, pinned to
-//!    `AGENT_BROWSER_STREAM_PORT` (default 9223) by the hosted supervisor.
-//!
-//! `alien` wins when both are live (it is the primary hosted stack); the
-//! client can force one with `?source=alien|plain`. The relay itself is
+//! The relay itself is
 //! transparent: viewport frames flow upstream→client and input events
 //! client→upstream untouched, so the browser-side protocol is exactly what
 //! the stream servers speak. When no source is dialable the client gets one
@@ -27,9 +20,7 @@ use futures_util::{SinkExt, StreamExt};
 use serde_json::json;
 use tokio_tungstenite::tungstenite::Message as TgMessage;
 
-const DEFAULT_PLAIN_STREAM_PORT: u16 = 9223;
-
-/// A dialable stream source, in preference order.
+/// A dialable Alien stream source.
 struct Source {
     name: &'static str,
     url: String,
@@ -80,26 +71,10 @@ fn alien_source() -> Option<Source> {
     best.map(|(_, source)| source)
 }
 
-fn plain_source() -> Source {
-    let port = std::env::var("AGENT_BROWSER_STREAM_PORT")
-        .ok()
-        .and_then(|v| v.parse::<u16>().ok())
-        .unwrap_or(DEFAULT_PLAIN_STREAM_PORT);
-    Source {
-        name: "plain",
-        url: format!("ws://127.0.0.1:{port}"),
-    }
-}
-
 fn candidates(requested: Option<&str>) -> Vec<Source> {
     match requested {
-        Some("alien") => alien_source().into_iter().collect(),
-        Some("plain") => vec![plain_source()],
-        _ => {
-            let mut list: Vec<Source> = alien_source().into_iter().collect();
-            list.push(plain_source());
-            list
-        }
+        Some(source) if source != "alien" => Vec::new(),
+        _ => alien_source().into_iter().collect(),
     }
 }
 
@@ -175,4 +150,15 @@ pub async fn relay(mut client: WebSocket, requested_source: Option<String>) {
         _ = to_client => {},
     }
     tracing::info!(source = source_name, "browser stream relay closed");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::candidates;
+
+    #[test]
+    fn removed_plain_browser_source_cannot_be_requested() {
+        assert!(candidates(Some("plain")).is_empty());
+        assert!(candidates(Some("agent-browser")).is_empty());
+    }
 }

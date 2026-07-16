@@ -44,6 +44,20 @@ impl PromptDialect for ClaudeDialect {
     }
 }
 
+/// Providers that need explicit cache breakpoints but do not honour an
+/// extended TTL — Google Gemini and Alibaba Qwen, reached via OpenRouter.
+/// Both halves get the default 5-minute marker; only Anthropic accepts `1h`.
+pub struct ExplicitCacheDialect;
+
+impl PromptDialect for ExplicitCacheDialect {
+    fn cache_marker_for_stable(&self) -> Option<CacheHint> {
+        Some(CacheHint::Ephemeral)
+    }
+    fn cache_marker_for_volatile(&self) -> Option<CacheHint> {
+        Some(CacheHint::Ephemeral)
+    }
+}
+
 /// Baseline for every other provider — no cache markers (providers either
 /// ignore them or use a separate caching API).
 pub struct DefaultDialect;
@@ -54,6 +68,32 @@ impl PromptDialect for DefaultDialect {
     }
     fn cache_marker_for_volatile(&self) -> Option<CacheHint> {
         None
+    }
+}
+
+/// Dialect for a model served through OpenRouter, keyed off the vendor segment
+/// of `openrouter/<vendor>/<model>`.
+///
+/// OpenRouter relays `cache_control` to the upstream provider rather than
+/// stripping it, and converts between the Anthropic and OpenAI marker formats.
+/// So the dialect follows whoever actually serves the model:
+///
+/// - `anthropic` — explicit breakpoints, and the only vendor accepting the
+///   extended `ttl: "1h"` marker.
+/// - `google` (Gemini) and `qwen` (Alibaba) — explicit breakpoints, 5m only.
+/// - Everyone else (`openai`, `x-ai`, `moonshotai`, `z-ai`, `deepseek`, …) —
+///   automatic prefix caching, so a marker buys nothing.
+///
+/// Returns `None` for vendors that cache automatically.
+///
+/// See <https://openrouter.ai/docs/features/prompt-caching>.
+fn openrouter_dialect(model_id: &str) -> Option<Box<dyn PromptDialect>> {
+    let lower = model_id.trim().to_ascii_lowercase();
+    let vendor = lower.strip_prefix("openrouter/")?.split('/').next()?;
+    match vendor {
+        "anthropic" => Some(Box::new(ClaudeDialect)),
+        "google" | "qwen" => Some(Box::new(ExplicitCacheDialect)),
+        _ => None,
     }
 }
 
@@ -69,8 +109,10 @@ pub fn dialect_for_model(model_id: &str) -> Box<dyn PromptDialect> {
             "anthropic" => Box::new(ClaudeDialect),
             _ => Box::new(DefaultDialect),
         },
-        // OpenRouter is a relay — the underlying model could be Claude, but
-        // OpenRouter strips the cache_control hint anyway. Treat as default.
+        // OpenRouter is a relay, and it forwards cache_control to the upstream
+        // provider rather than dropping it — so the dialect is decided by the
+        // vendor actually serving the model, not by OpenRouter itself.
+        Some("openrouter") => openrouter_dialect(model_id).unwrap_or_else(|| Box::new(DefaultDialect)),
         _ => Box::new(DefaultDialect),
     }
 }
@@ -93,9 +135,67 @@ mod tests {
     }
 
     #[test]
-    fn openrouter_falls_back_to_default() {
-        let dialect = dialect_for_model("openrouter/anthropic/claude-opus-4");
-        assert!(dialect.cache_marker_for_stable().is_none());
+    fn openrouter_claude_gets_the_extended_ttl_marker() {
+        // OpenRouter forwards cache_control upstream, and Anthropic is the only
+        // vendor accepting the 1h TTL. Every model id here is one we ship in
+        // config/model_context_limits.json.
+        for model in [
+            "openrouter/anthropic/claude-opus-4.7",
+            "openrouter/anthropic/claude-opus-4.6",
+            "openrouter/anthropic/claude-sonnet-4.6",
+            "openrouter/anthropic/claude-haiku-4.5",
+        ] {
+            let dialect = dialect_for_model(model);
+            assert_eq!(
+                dialect.cache_marker_for_stable(),
+                Some(CacheHint::Persistent),
+                "{model} must cache its stable prefix for 1h"
+            );
+            assert_eq!(
+                dialect.cache_marker_for_volatile(),
+                Some(CacheHint::Ephemeral),
+                "{model} must cache its volatile tail for 5m"
+            );
+        }
+    }
+
+    #[test]
+    fn openrouter_gemini_and_qwen_get_explicit_breakpoints_without_extended_ttl() {
+        // Both need explicit markers, but 1h TTL is Anthropic-only.
+        for model in [
+            "openrouter/google/gemini-3.1-pro-preview",
+            "openrouter/google/gemini-3-flash-preview",
+            "openrouter/qwen/qwen3.5-plus-02-15",
+            "openrouter/qwen/qwen3.5-flash-02-23",
+        ] {
+            let dialect = dialect_for_model(model);
+            assert_eq!(
+                dialect.cache_marker_for_stable(),
+                Some(CacheHint::Ephemeral),
+                "{model} needs an explicit breakpoint"
+            );
+            assert_eq!(dialect.cache_marker_for_volatile(), Some(CacheHint::Ephemeral));
+        }
+    }
+
+    #[test]
+    fn openrouter_auto_caching_vendors_get_no_markers() {
+        // These cache automatically; a breakpoint buys nothing and costs
+        // bookkeeping. Z.AI (GLM), Moonshot/Kimi, Grok and OpenAI are all
+        // documented as automatic.
+        for model in [
+            "openrouter/moonshotai/kimi-k2.6",
+            "openrouter/z-ai/glm-5.1",
+            "openrouter/x-ai/grok-4.20-beta",
+            "openrouter/openai/gpt-5.4",
+            "openrouter/xiaomi/mimo-v2-flash",
+        ] {
+            let dialect = dialect_for_model(model);
+            assert!(
+                dialect.cache_marker_for_stable().is_none(),
+                "{model} caches automatically and must not get a marker"
+            );
+        }
     }
 
     #[test]

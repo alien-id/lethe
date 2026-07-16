@@ -32,7 +32,7 @@ dotenvy = "0.15"
 eventsource-stream = "0.2"
 fastembed = { version = "5.13", optional = true }
 futures-util = "0.3"
-genai = "0.5.3"
+genai = "0.6.5"
 glob = "0.3"
 hf-hub = { version = "0.5", optional = true }
 hkdf = "0.12"
@@ -57,7 +57,7 @@ sqlite-vec = "0.1"
 thiserror = "2.0"
 tokio = { version = "1.48", features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
 # WS client for the in-container browser viewport relay (/browser/stream →
-# agent-browser / agent-id-browser stream servers on localhost). Version pinned
+# the agent-id-browser stream server on localhost). Version pinned
 # to the one axum's "ws" feature already pulls in, so no duplicate tree.
 tokio-tungstenite = "0.29"
 tracing = "0.1"
@@ -89,7 +89,10 @@ debug = "line-tables-only"
 [profile.dev.package."*"]
 debug = false
 
-# Local fork of genai 0.5.3 that adds CacheControl::Persistent for Anthropic
-# 1h prompt-cache TTL. See vendor/genai/LETHE_FORK.md for the patch surface.
+# Local fork of genai 0.6.5 carrying a single patch: per-message cache_control
+# forwarded through the OpenAI adapter, so prompt caching reaches Anthropic /
+# Gemini / Qwen via OpenRouter. Upstream only does request-level cache_control
+# (OpenAI's native prompt_cache_retention), which does not cover that route.
+# See vendor/genai/LETHE_FORK.md.
 [patch.crates-io]
 genai = { path = "vendor/genai" }

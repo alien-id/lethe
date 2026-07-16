@@ -302,7 +302,7 @@ pub(crate) fn sh_command(command: ShCommand) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn web_command(command: WebCommand) -> Result<()> {
+pub(crate) async fn web_command(command: WebCommand) -> Result<()> {
     let settings = Settings::from_env();
     let tools = WebTools::new(settings.paths.cache_dir);
     let output = match command {
@@ -312,8 +312,12 @@ pub(crate) fn web_command(command: WebCommand) -> Result<()> {
             num_results,
             include_text,
             category,
-        } => tools.web_search(&query, num_results, include_text, &category),
-        WebCommand::Fetch { url, max_chars } => tools.fetch_webpage(&url, max_chars),
+        } => {
+            tools
+                .web_search(&query, num_results, include_text, &category)
+                .await
+        }
+        WebCommand::Fetch { url, max_chars } => tools.fetch_webpage(&url, max_chars).await,
     };
     println!("{output}");
     Ok(())

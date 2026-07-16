@@ -11,25 +11,27 @@ use reqwest::RequestBuilder;
 /// NOTE: This adapter is activated for namespaced model names (e.g., `together::meta-llama/Llama-3-8b-chat-hf`)
 pub struct TogetherAdapter;
 
-/// For together, perhaps to many to list.
-pub(in crate::adapter) const MODELS: &[&str] = &[];
-
 impl TogetherAdapter {
 	pub const API_KEY_DEFAULT_ENV_NAME: &str = "TOGETHER_API_KEY";
 }
 
 impl Adapter for TogetherAdapter {
+	const DEFAULT_API_KEY_ENV_NAME: Option<&'static str> = Some(Self::API_KEY_DEFAULT_ENV_NAME);
+
 	fn default_endpoint() -> Endpoint {
 		const BASE_URL: &str = "https://api.together.xyz/v1/";
 		Endpoint::from_static(BASE_URL)
 	}
 
 	fn default_auth() -> AuthData {
-		AuthData::from_env(Self::API_KEY_DEFAULT_ENV_NAME)
+		match Self::DEFAULT_API_KEY_ENV_NAME {
+			Some(env_name) => AuthData::from_env(env_name),
+			None => AuthData::None,
+		}
 	}
 
-	async fn all_model_names(_kind: AdapterKind) -> Result<Vec<String>> {
-		Ok(MODELS.iter().map(|s| s.to_string()).collect())
+	async fn all_model_names(kind: AdapterKind, endpoint: Endpoint, auth: AuthData) -> Result<Vec<String>> {
+		OpenAIAdapter::list_model_names_for_end_target(kind, endpoint, auth).await
 	}
 
 	fn get_service_url(model: &ModelIden, service_type: ServiceType, endpoint: Endpoint) -> Result<String> {

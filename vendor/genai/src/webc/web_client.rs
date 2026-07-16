@@ -10,12 +10,21 @@ pub struct WebClient {
 	reqwest_client: reqwest::Client,
 }
 
-// Implements Default
+// Implements Default with performance optimizations
 impl Default for WebClient {
 	fn default() -> Self {
-		WebClient {
-			reqwest_client: reqwest::Client::new(),
-		}
+		use std::time::Duration;
+		let reqwest_client = reqwest::Client::builder()
+			.tcp_nodelay(true)
+			.gzip(true)
+			.pool_max_idle_per_host(4)
+			.http2_keep_alive_interval(Some(Duration::from_secs(20)))
+			.http2_keep_alive_timeout(Duration::from_secs(10))
+			.http2_keep_alive_while_idle(true)
+			.http2_adaptive_window(true)
+			.build()
+			.expect("Failed to build default reqwest client");
+		WebClient { reqwest_client }
 	}
 }
 
@@ -32,7 +41,7 @@ impl WebClient {
 // region:    --- Web Method Implementation
 
 impl WebClient {
-	pub async fn do_get(&self, url: &str, headers: &[(String, String)]) -> Result<WebResponse> {
+	pub async fn do_get(&self, url: &str, headers: &Headers) -> Result<WebResponse> {
 		let mut reqwest_builder = self.reqwest_client.request(Method::GET, url);
 
 		for (k, v) in headers.iter() {

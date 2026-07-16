@@ -775,9 +775,18 @@ fn shell_id_arg(args: &Value) -> String {
     String::new()
 }
 
+fn invokes_removed_agent_browser(command: &str) -> bool {
+    command.to_ascii_lowercase().contains("agent-browser")
+}
+
 fn exec_bash(registry: &ToolRegistry<'_>, args: &Value) -> String {
+    let command = string_arg(args, "command");
+    if registry.runtime.secure_prompt.is_some() && invokes_removed_agent_browser(&command) {
+        return "Error: `agent-browser` has been removed from hosted Lethe; do not install or invoke it. Call request_tool(name=\"alien_browser_open\") to load the Alien browser family, then use alien_browser_open / alien_browser_act. For forms, use alien_browser_inspect_form followed by one alien_browser_fill_form call."
+            .to_string();
+    }
     registry.shell.bash(
-        &string_arg(args, "command"),
+        &command,
         u64_arg(args, "timeout", DEFAULT_TIMEOUT_SECONDS),
         bool_arg(args, "run_in_background", false),
         bool_arg(args, "use_pty", false),
@@ -821,7 +830,7 @@ fn exec_check_command_exists(registry: &ToolRegistry<'_>, args: &Value) -> Strin
 pub const TOOL_DEFS: &[ToolDef] = &[
     ToolDef {
         name: "bash",
-        description: "Run a shell command (use run_in_background for long-running). For INTERACTIVE commands that wait for input or print a login URL + one-time code (e.g. `gh auth login`, OAuth device flows), set run_in_background=true AND use_pty=true with a generous timeout, then read the code with get_terminal_screen and send it to the user — never run a login in the foreground (it can't be completed and is killed when the call returns).",
+        description: "Run a shell command (use run_in_background for long-running). Browser automation does NOT belong in shell: never install or invoke the removed `agent-browser`; request `alien_browser_open` and use the typed Alien browser tools instead. For INTERACTIVE commands that wait for input or print a login URL + one-time code (e.g. `gh auth login`, OAuth device flows), set run_in_background=true AND use_pty=true with a generous timeout, then read the code with get_terminal_screen and send it to the user — never run a login in the foreground (it can't be completed and is killed when the call returns).",
         params: &[
             p_str_req("command", "Shell command."),
             p_int("timeout", "Timeout (sec)."),
@@ -911,6 +920,19 @@ mod tests {
             "bash_4"
         );
         assert_eq!(shell_id_arg(&json!({})), "");
+    }
+
+    #[test]
+    fn removed_agent_browser_command_is_detected_without_blocking_alien_browser() {
+        assert!(invokes_removed_agent_browser(
+            "npm install -g agent-browser"
+        ));
+        assert!(invokes_removed_agent_browser(
+            "AGENT-BROWSER open https://example.com"
+        ));
+        assert!(!invokes_removed_agent_browser(
+            "agent-id-browser open --name main"
+        ));
     }
 
     #[test]

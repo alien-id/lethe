@@ -1,7 +1,8 @@
 use crate::adapter::{AdapterDispatcher, AdapterKind, ServiceType, WebRequestData};
 use crate::chat::{ChatOptions, ChatOptionsSet, ChatRequest, ChatResponse, ChatStreamResponse};
+use crate::client::ModelSpec;
 use crate::embed::{EmbedOptions, EmbedOptionsSet, EmbedRequest, EmbedResponse};
-use crate::resolver::AuthData;
+use crate::resolver::{AuthData, ProviderConfig};
 use crate::{Client, Error, ModelIden, Result, ServiceTarget};
 
 /// High-level client APIs.
@@ -16,13 +17,42 @@ impl Client {
 	///
 	/// - May evolve to accept a custom endpoint.
 	///
+	/// - Accepts [`ProviderConfig`] or compatible values to override endpoint and auth.
+	///
 	/// - For most adapters, names also drive AdapterKind detection (see [`AdapterKind`]).
 	///
 	/// - Adapters should filter non-chat models until more skills are supported.
 	///   Future: `model_names(adapter_kind, Option<&[Skill]>)`.
-	pub async fn all_model_names(&self, adapter_kind: AdapterKind) -> Result<Vec<String>> {
-		let models = AdapterDispatcher::all_model_names(adapter_kind).await?;
+	pub async fn all_model_names(
+		&self,
+		adapter_kind: AdapterKind,
+		provider_config: impl Into<ProviderConfig>,
+	) -> Result<Vec<String>> {
+		let ProviderConfig { endpoint, auth } = provider_config.into();
+
+		let (auth, endpoint) = match (auth, endpoint) {
+			(Some(auth), Some(endpoint)) => (auth, endpoint),
+			(auth, endpoint) => {
+				let (default_auth, default_endpoint) = self.config().resolve_adapter_config(adapter_kind).await?;
+				(auth.unwrap_or(default_auth), endpoint.unwrap_or(default_endpoint))
+			}
+		};
+
+		let models = AdapterDispatcher::all_model_names(adapter_kind, endpoint, auth).await?;
 		Ok(models)
+	}
+
+	/// Returns the bound [`AdapterKind`] for this Client, if any.
+	///
+	/// Set via [`ClientBuilder::with_adapter_kind`] at construction
+	/// time — `None` for Clients that did not opt into the bound
+	/// shape and still use per-call model-name inference. Useful for
+	/// callers that want to introspect a Client without tracking the
+	/// provider in parallel state.
+	///
+	/// [`ClientBuilder::with_adapter_kind`]: crate::ClientBuilder::with_adapter_kind
+	pub fn adapter_kind(&self) -> Option<AdapterKind> {
+		self.config().adapter_kind()
 	}
 
 	/// Builds a ModelIden by inferring AdapterKind from the model name.
@@ -41,26 +71,33 @@ impl Client {
 		Ok(target.model)
 	}
 
-	/// Resolves the service target (endpoint, auth, and model) for the given model name.
-	pub async fn resolve_service_target(&self, model_name: &str) -> Result<ServiceTarget> {
-		let model = self.default_model(model_name)?;
-		self.config().resolve_service_target(model).await
+	/// Resolves the service target (endpoint, auth, and model) for the given model.
+	///
+	/// Accepts any type that implements `Into<ModelSpec>`:
+	/// - `&str` or `String`: Model name with full inference
+	/// - `ModelIden`: Explicit adapter, resolves auth/endpoint
+	/// - `ServiceTarget`: Uses directly, bypasses model mapping and auth resolution
+	pub async fn resolve_service_target(&self, model: impl Into<ModelSpec>) -> Result<ServiceTarget> {
+		self.config().resolve_model_spec(model.into()).await
 	}
 
 	/// Sends a chat request and returns the full response.
+	///
+	/// Accepts any type that implements `Into<ModelSpec>`:
+	/// - `&str` or `String`: Model name with full inference
+	/// - `ModelIden`: Explicit adapter, resolves auth/endpoint
+	/// - `ServiceTarget`: Uses directly, bypasses model mapping and auth resolution
 	pub async fn exec_chat(
 		&self,
-		model: &str,
+		model: impl Into<ModelSpec>,
 		chat_req: ChatRequest,
-		// options not implemented yet
 		options: Option<&ChatOptions>,
 	) -> Result<ChatResponse> {
 		let options_set = ChatOptionsSet::default()
 			.with_chat_options(options)
 			.with_client_options(self.config().chat_options());
 
-		let model = self.default_model(model)?;
-		let target = self.config().resolve_service_target(model).await?;
+		let target = self.config().resolve_model_spec(model.into()).await?;
 		let model = target.model.clone();
 		let auth_data = target.auth.clone();
 
@@ -71,7 +108,7 @@ impl Client {
 		} = AdapterDispatcher::to_web_request_data(target, ServiceType::Chat, chat_req, options_set.clone())?;
 
 		if let Some(extra_headers) = options.and_then(|o| o.extra_headers.as_ref()) {
-			headers.merge_with(&extra_headers);
+			headers.merge_with(extra_headers);
 		}
 
 		if let AuthData::RequestOverride {
@@ -116,18 +153,22 @@ impl Client {
 	}
 
 	/// Streams a chat response.
+	///
+	/// Accepts any type that implements `Into<ModelSpec>`:
+	/// - `&str` or `String`: Model name with full inference
+	/// - `ModelIden`: Explicit adapter, resolves auth/endpoint
+	/// - `ServiceTarget`: Uses directly, bypasses model mapping and auth resolution
 	pub async fn exec_chat_stream(
 		&self,
-		model: &str,
-		chat_req: ChatRequest, // options not implemented yet
+		model: impl Into<ModelSpec>,
+		chat_req: ChatRequest,
 		options: Option<&ChatOptions>,
 	) -> Result<ChatStreamResponse> {
 		let options_set = ChatOptionsSet::default()
 			.with_chat_options(options)
 			.with_client_options(self.config().chat_options());
 
-		let model = self.default_model(model)?;
-		let target = self.config().resolve_service_target(model).await?;
+		let target = self.config().resolve_model_spec(model.into()).await?;
 		let model = target.model.clone();
 		let auth_data = target.auth.clone();
 
@@ -138,7 +179,7 @@ impl Client {
 		} = AdapterDispatcher::to_web_request_data(target, ServiceType::ChatStream, chat_req, options_set.clone())?;
 
 		if let Some(extra_headers) = options.and_then(|o| o.extra_headers.as_ref()) {
-			headers.merge_with(&extra_headers);
+			headers.merge_with(extra_headers);
 		}
 
 		// TODO: Need to check this.
@@ -167,9 +208,11 @@ impl Client {
 	}
 
 	/// Creates embeddings for a single input string.
+	///
+	/// Accepts any type that implements `Into<ModelSpec>` for the model parameter.
 	pub async fn embed(
 		&self,
-		model: &str,
+		model: impl Into<ModelSpec>,
 		input: impl Into<String>,
 		options: Option<&EmbedOptions>,
 	) -> Result<EmbedResponse> {
@@ -178,9 +221,11 @@ impl Client {
 	}
 
 	/// Creates embeddings for multiple input strings.
+	///
+	/// Accepts any type that implements `Into<ModelSpec>` for the model parameter.
 	pub async fn embed_batch(
 		&self,
-		model: &str,
+		model: impl Into<ModelSpec>,
 		inputs: Vec<String>,
 		options: Option<&EmbedOptions>,
 	) -> Result<EmbedResponse> {
@@ -189,9 +234,14 @@ impl Client {
 	}
 
 	/// Sends an embedding request and returns the response.
+	///
+	/// Accepts any type that implements `Into<ModelSpec>`:
+	/// - `&str` or `String`: Model name with full inference
+	/// - `ModelIden`: Explicit adapter, resolves auth/endpoint
+	/// - `ServiceTarget`: Uses directly, bypasses model mapping and auth resolution
 	pub async fn exec_embed(
 		&self,
-		model: &str,
+		model: impl Into<ModelSpec>,
 		embed_req: EmbedRequest,
 		options: Option<&EmbedOptions>,
 	) -> Result<EmbedResponse> {
@@ -199,8 +249,7 @@ impl Client {
 			.with_request_options(options)
 			.with_client_options(self.config().embed_options());
 
-		let model = self.default_model(model)?;
-		let target = self.config().resolve_service_target(model).await?;
+		let target = self.config().resolve_model_spec(model.into()).await?;
 		let model = target.model.clone();
 
 		let WebRequestData { headers, payload, url } =

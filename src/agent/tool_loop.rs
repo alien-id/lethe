@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock, RwLock};
 
 use anyhow::anyhow;
-use genai::chat::{ChatMessage, ContentPart, MessageContent, ToolCall, ToolResponse};
+use genai::chat::{ChatMessage, ChatRole, ContentPart, MessageContent, ToolCall, ToolResponse};
 use regex::Regex;
 use serde_json::{Map, Value, json};
 use uuid::Uuid;
@@ -88,17 +88,87 @@ fn skip_tool_log(name: &str) -> bool {
 }
 
 fn is_error_result(result: &str) -> bool {
-    result.starts_with("Error:")
-        || result.starts_with("Unknown tool:")
-        || serde_json::from_str::<serde_json::Value>(result)
-            .ok()
-            .and_then(|value| {
-                value
+    let trimmed = result.trim_start();
+    if trimmed.starts_with("Error:")
+        || trimmed.starts_with("Unknown tool:")
+        || trimmed.starts_with("✗")
+        || trimmed
+            .strip_prefix("Exit code:")
+            .and_then(|tail| tail.split_whitespace().next())
+            .and_then(|code| code.parse::<i32>().ok())
+            .is_some_and(|code| code != 0)
+    {
+        return true;
+    }
+    serde_json::from_str::<serde_json::Value>(trimmed)
+        .ok()
+        .is_some_and(|value| {
+            value.get("ok").and_then(Value::as_bool) == Some(false)
+                || value.get("error").is_some_and(|error| !error.is_null())
+                || value
                     .get("status")
-                    .and_then(|status| status.as_str())
-                    .map(str::to_owned)
-            })
-            .is_some_and(|status| status.eq_ignore_ascii_case("error"))
+                    .and_then(Value::as_str)
+                    .is_some_and(|status| status.eq_ignore_ascii_case("error"))
+        })
+}
+
+/// Re-apply a hard context ceiling on every tool iteration. The initial turn
+/// clamp cannot account for schemas loaded later via `request_tool`, nor for a
+/// long chain of assistant/tool-result pairs appended after assembly. Prefer
+/// dropping the oldest completed tool exchanges; if needed, then drop oldest
+/// pre-turn history while preserving system messages and the current user ask.
+fn clamp_chat_request_to_budget(
+    request: &mut genai::chat::ChatRequest,
+    current_user_index: &mut usize,
+    max_total_chars: usize,
+) -> usize {
+    if max_total_chars == 0 {
+        return 0;
+    }
+    let tool_chars = request
+        .tools
+        .as_ref()
+        .map(|tools| tools.iter().map(genai::chat::Tool::size).sum::<usize>())
+        .unwrap_or_default();
+    let message_budget = max_total_chars.saturating_sub(tool_chars);
+    let total = |messages: &[ChatMessage]| messages.iter().map(ChatMessage::size).sum::<usize>();
+    let mut dropped = 0;
+
+    // Completed exchanges appended after the current user request are the most
+    // disposable and are usually the source of runaway form/research turns.
+    while total(&request.messages) > message_budget
+        && *current_user_index + 3 < request.messages.len()
+    {
+        request.messages.remove(*current_user_index + 1);
+        dropped += 1;
+        while *current_user_index + 1 < request.messages.len().saturating_sub(1)
+            && request.messages[*current_user_index + 1].role == ChatRole::Tool
+        {
+            request.messages.remove(*current_user_index + 1);
+            dropped += 1;
+        }
+    }
+
+    // If schemas themselves grew enough to squeeze the initial prompt, prune
+    // oldest non-system history but never the current user message.
+    let history_start = request
+        .messages
+        .iter()
+        .position(|message| message.role != ChatRole::System)
+        .unwrap_or(request.messages.len());
+    while total(&request.messages) > message_budget && history_start < *current_user_index {
+        request.messages.remove(history_start);
+        *current_user_index = current_user_index.saturating_sub(1);
+        dropped += 1;
+        while history_start < *current_user_index
+            && request.messages[history_start].role == ChatRole::Tool
+        {
+            request.messages.remove(history_start);
+            *current_user_index = current_user_index.saturating_sub(1);
+            dropped += 1;
+        }
+    }
+    dropped
 }
 
 /// Transient failures — the kind that often succeed on a later attempt
@@ -485,6 +555,7 @@ pub(super) async fn complete_turn_with_tools_config_shared(
         runtime,
     );
     let mut request = build_chat_request(messages);
+    let mut current_user_index = request.messages.len().saturating_sub(1);
     let mut last_text = String::new();
     let mut total_tool_calls: usize = 0;
     let mut total_tool_errors: usize = 0;
@@ -501,6 +572,7 @@ pub(super) async fn complete_turn_with_tools_config_shared(
     // base model again. With no tool model configured this stays false and the
     // whole turn runs on the base model, exactly as before.
     let mut entered_tool_chain = false;
+    let mut tool_model_disabled = false;
 
     for iteration in 0..MAX_TOOL_ITERATIONS {
         request.tools = Some(registry.tools_for_active(&active_tools));
@@ -518,11 +590,23 @@ pub(super) async fn complete_turn_with_tools_config_shared(
             .clone();
         // Once we're inside a tool chain and a dedicated tool model is
         // configured, route to it; otherwise use the base model for this turn.
-        let model_id = if entered_tool_chain && router.config().has_tool_model() {
-            router.config().tool_model().to_string()
-        } else {
-            router.config().model_for(use_aux).to_string()
-        };
+        let model_id =
+            if entered_tool_chain && !tool_model_disabled && router.config().has_tool_model() {
+                router.config().tool_model().to_string()
+            } else {
+                router.config().model_for(use_aux).to_string()
+            };
+        let max_total_chars = context
+            .settings
+            .llm
+            .context_limit_for(&model_id)
+            .saturating_sub(context.settings.llm.llm_max_output as u64)
+            .saturating_mul(4) as usize;
+        let dropped =
+            clamp_chat_request_to_budget(&mut request, &mut current_user_index, max_total_chars);
+        if dropped > 0 {
+            tracing::warn!(iteration, dropped, model = %model_id, "trimmed tool-loop context to budget");
+        }
         let observer_for_stream = registry.turn_observer().cloned();
         let response = match observer_for_stream {
             Some(observer) => {
@@ -587,6 +671,18 @@ pub(super) async fn complete_turn_with_tools_config_shared(
             // Empty content + no tool calls — model stuck. Nudge once;
             // on second strike, fall through to the no-tools wrap-up.
             empty_count += 1;
+            if entered_tool_chain && !tool_model_disabled && router.config().has_tool_model() {
+                tool_model_disabled = true;
+                tracing::warn!(
+                    tool_model = %router.config().tool_model(),
+                    "tool model returned empty; falling back to the base model for this chain"
+                );
+                request.messages.push(ChatMessage::user(
+                    "[The tool model returned an empty response. Continue the task from the tool results above.]"
+                        .to_string(),
+                ));
+                continue;
+            }
             if empty_count >= MAX_EMPTY_RESPONSES {
                 tracing::warn!(
                     empty_count,
@@ -616,7 +712,7 @@ pub(super) async fn complete_turn_with_tools_config_shared(
                 .router
                 .read()
                 .map_err(|error| AgentError::Llm(anyhow!("router lock poisoned: {error}")))?;
-            if router.config().has_tool_model() {
+            if router.config().has_tool_model() && !tool_model_disabled {
                 tracing::info!(
                     tool_model = %router.config().tool_model(),
                     "tool call detected — switching to the tool model for the rest of the chain"
@@ -1179,12 +1275,40 @@ mod tests {
     fn is_error_result_detects_standard_error_prefixes() {
         assert!(is_error_result("Error: file not found"));
         assert!(is_error_result("Unknown tool: foo"));
+        assert!(is_error_result("Exit code: 1\n✗ invalid selector"));
+        assert!(is_error_result("✗ command failed"));
         assert!(is_error_result(
             r#"{"status":"error","message":"browser failed"}"#
         ));
+        assert!(is_error_result(r#"{"ok":false,"error":"stale ref"}"#));
+        assert!(is_error_result(r#"{"error":"browser failed"}"#));
+        assert!(!is_error_result(r#"{"ok":true,"error":null}"#));
         assert!(!is_error_result(r#"{"status":"OK","message":"opened"}"#));
         assert!(!is_error_result("Successfully wrote 12 bytes"));
         assert!(!is_error_result(""));
+    }
+
+    #[test]
+    fn tool_loop_budget_counts_schemas_and_drops_old_exchanges() {
+        let mut request = genai::chat::ChatRequest::new(vec![
+            ChatMessage::system("system"),
+            ChatMessage::user("current request"),
+            ChatMessage::assistant("old assistant output that is intentionally long"),
+            ChatMessage::from(ToolResponse::new(
+                "call-1",
+                "old tool result that is intentionally long",
+            )),
+            ChatMessage::assistant("latest answer"),
+        ]);
+        request.tools = Some(vec![
+            genai::chat::Tool::new("large_tool").with_description("x".repeat(80)),
+        ]);
+        let mut current_user_index = 1;
+        let dropped = clamp_chat_request_to_budget(&mut request, &mut current_user_index, 125);
+        assert!(dropped >= 2, "old assistant/tool pair should be removed");
+        assert_eq!(request.messages[0].role, ChatRole::System);
+        assert_eq!(request.messages[current_user_index].role, ChatRole::User);
+        assert_eq!(request.messages.last().unwrap().role, ChatRole::Assistant);
     }
 
     #[test]
