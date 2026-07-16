@@ -872,7 +872,7 @@ pub const TOOL_DEFS: &[ToolDef] = &[
         name: "alien_browser_open",
         description: "Start the persistent Alien browser and optionally navigate in the same call. The shared `main` profile is created automatically as an anonymous L0 profile on first use, so public pages need no login/setup. Returns once ready; use the typed form tools for forms and alien_browser_act for other actions.",
         params: &[
-            p_str("name", "Session name (default 'main')."),
+            p_str("name", "Session name (default 'main'). Only 'main' auto-creates; any other name must match a profile sealed by alien_browser_login/auto_login, else open fails with NO_PROFILE. For public browsing omit this."),
             p_str("url", "Optional http(s) URL to open immediately."),
             p_bool("headed", "Show the window (requires a GUI session)."),
         ],

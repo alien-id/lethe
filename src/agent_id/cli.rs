@@ -192,31 +192,45 @@ pub async fn spawn_daemon_ready(
     let mut stderr = child.stderr.take();
 
     let mut reader = BufReader::new(stdout).lines();
-    // Terminal outcome from the daemon's first meaningful stdout line: Ok(ready
-    // value), or Err(the daemon's own {ok:false,...} message). None = stdout
-    // closed with no verdict (the daemon died); we then read stderr for why.
+    // Terminal outcome from the daemon's stdout: Ok(ready value), or Err(the
+    // daemon's own {ok:false,...} message). None = stdout closed with no
+    // verdict (the daemon died); we then read stderr for why. The daemon
+    // PRETTY-PRINTS structured errors (multi-line JSON), so a per-line parse
+    // alone would swallow them — accumulate lines from each `{` and retry the
+    // buffer, otherwise "no browser-profile named 'x'" degrades to an opaque
+    // "closed before ready".
+    let mut stdout_tail = String::new();
     let outcome = tokio::time::timeout(Duration::from_secs(90), async {
+        let mut json_buf = String::new();
         while let Ok(Some(line)) = reader.next_line().await {
             let trimmed = line.trim();
             if trimmed.is_empty() {
                 continue;
             }
-            if let Ok(value) = serde_json::from_str::<Value>(trimmed) {
-                if value.get("ready").and_then(Value::as_bool) == Some(true) {
-                    return Some(Ok(value));
-                }
-                // A structured failure the daemon reports before ready — surface
-                // its own message (e.g. "no browser-profile named 'x' — run
-                // auto-login first") instead of a generic timeout.
-                if value.get("ok").and_then(Value::as_bool) == Some(false) {
-                    let msg = value
-                        .get("message")
-                        .or_else(|| value.get("error"))
-                        .and_then(Value::as_str)
-                        .unwrap_or("browser daemon reported an error")
-                        .to_string();
-                    return Some(Err(msg));
-                }
+            stdout_tail.push_str(trimmed);
+            stdout_tail.push('\n');
+            if trimmed.starts_with('{') {
+                json_buf.clear();
+            }
+            json_buf.push_str(trimmed);
+            json_buf.push('\n');
+            let Ok(value) = serde_json::from_str::<Value>(json_buf.trim()) else {
+                continue;
+            };
+            if value.get("ready").and_then(Value::as_bool) == Some(true) {
+                return Some(Ok(value));
+            }
+            // A structured failure the daemon reports before ready — surface
+            // its own message (e.g. "no browser-profile named 'x' — run
+            // auto-login first") instead of a generic timeout.
+            if value.get("ok").and_then(Value::as_bool) == Some(false) {
+                let msg = value
+                    .get("message")
+                    .or_else(|| value.get("error"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("browser daemon reported an error")
+                    .to_string();
+                return Some(Err(msg));
             }
         }
         None
@@ -254,7 +268,14 @@ pub async fn spawn_daemon_ready(
                 let _ = err.read_to_string(&mut buf).await;
             }
             let _ = child.kill().await;
-            let tail = buf.trim();
+            // Prefer stderr; fall back to whatever the daemon printed on
+            // stdout (non-JSON text) so the model never sees a bare "closed
+            // before ready" when there was a reason available.
+            let tail = if buf.trim().is_empty() {
+                stdout_tail.trim().chars().take(400).collect::<String>()
+            } else {
+                buf.trim().chars().take(400).collect::<String>()
+            };
             if tail.is_empty() {
                 Err("browser daemon closed before ready".to_string())
             } else {
