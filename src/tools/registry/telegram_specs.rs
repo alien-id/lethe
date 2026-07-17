@@ -54,10 +54,14 @@ pub const TOOL_DEFS: &[ToolDef] = &[
     // events, so those tools would be silent no-ops outside Telegram.
     ToolDef {
         name: "chat_send_message",
-        description: "Send an extra message to the user's chat during a long task — it appears immediately, before your final answer. Use it for progress notes on multi-minute work.",
+        description: "Send an extra message to the user's chat during a long task — it appears immediately, before your final answer. Use it for progress notes on multi-minute work. May also attach quick-reply buttons via reply_markup_json: a reply keyboard whose button texts ARE the replies the user sends when tapped (example: {\"keyboard\":[[{\"text\":\"Yes\"},{\"text\":\"No\"}]],\"resize_keyboard\":true,\"one_time_keyboard\":true}). Use it to offer 2-4 short answers when your message invites a quick pick; omit it for open-ended replies.",
         params: &[
             p_str_req("text", "Message text (markdown)."),
             p_str("parse_mode", "markdown, html, or empty."),
+            p_str(
+                "reply_markup_json",
+                "Optional quick-reply keyboard JSON. Button text = the reply sent on tap.",
+            ),
         ],
         category: ToolCategory::TransportClient,
         execute: ToolExecutor::Sync(exec_telegram_send_message),
