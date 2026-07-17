@@ -250,6 +250,13 @@ struct ToolLogEntry {
     success: bool,
 }
 
+/// Upper bound on the args/output preview streamed to UI clients (desktop
+/// debug card, TUI). Generous so the card shows the whole real-world result
+/// (memory, file reads, search), capped only to guard SSE/render against a
+/// pathological multi-megabyte tool output. The model still gets the full,
+/// untruncated result in its context.
+const TOOL_PREVIEW_CHARS: usize = 16_384;
+
 fn truncate_chars(value: &str, limit: usize) -> String {
     if value.chars().count() <= limit {
         return value.to_string();
@@ -755,7 +762,11 @@ pub(super) async fn complete_turn_with_tools_config_shared(
 
             let observer_for_tool = registry.turn_observer().cloned();
             if let Some(observer) = observer_for_tool.as_ref() {
-                observer.on_tool_start(&tool_name, &call_id, &truncate_chars(&args_string, 200));
+                observer.on_tool_start(
+                    &tool_name,
+                    &call_id,
+                    &truncate_chars(&args_string, TOOL_PREVIEW_CHARS),
+                );
             }
             let tool_started_at = std::time::Instant::now();
 
@@ -814,7 +825,7 @@ pub(super) async fn complete_turn_with_tools_config_shared(
                     &tool_name,
                     &call_id,
                     !is_error,
-                    &truncate_chars(&result, 200),
+                    &truncate_chars(&result, TOOL_PREVIEW_CHARS),
                     tool_started_at.elapsed().as_millis(),
                 );
             }
