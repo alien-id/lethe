@@ -450,6 +450,8 @@ fn termination_and_kill_notify_parent_once() {
             && event.payload.get("recipient") == Some(&json!(principal.clone()))
             && event.payload.get("channel") == Some(&json!("task_update"))
             && event.payload.get("intent") == Some(&json!("done"))
+            && event.payload.get("kind") == Some(&json!("done"))
+            && event.payload.get("source") == Some(&json!("termination"))
     }));
     assert!(
         !registry

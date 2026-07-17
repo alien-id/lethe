@@ -99,6 +99,7 @@ impl ActorRegistry {
                 "goals": actor.config.goals,
                 "spawned_by": actor.spawned_by,
                 "is_principal": is_principal,
+                "is_background": actor.config.background,
             }),
         );
         self.actors.insert(actor_id.clone(), actor);
@@ -178,6 +179,7 @@ impl ActorRegistry {
                     "name": actor.config.name,
                     "task_state": state_name(actor.task_state),
                     "turns_used": actor.turn_count,
+                    "is_background": actor.config.background,
                 }),
             );
             let actor_id = actor.id.clone();
@@ -352,6 +354,8 @@ impl ActorRegistry {
                 "content_preview": message.content.chars().take(200).collect::<String>(),
                 "intent": intent_name(resolved_intent),
                 "channel": resolved_intent.channel(),
+                "kind": message.metadata.get("kind"),
+                "source": message.metadata.get("source"),
             }),
         );
         if resolved_intent.channel() == "user_notify" {
@@ -1228,6 +1232,8 @@ impl ActorRegistry {
                 "content_preview": message.content.chars().take(200).collect::<String>(),
                 "intent": intent_name(intent),
                 "channel": intent.channel(),
+                "kind": message.metadata.get("kind"),
+                "source": message.metadata.get("source"),
             }),
         );
         Ok(())

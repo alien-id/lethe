@@ -66,6 +66,7 @@ fn ensure_dmn_actor(
     config.model = Some(ModelTier::Aux);
     config.max_turns = 10_000;
     config.persistent = true;
+    config.background = true;
     config.tools = vec![
         "memory_read".to_string(),
         "memory_update".to_string(),
@@ -359,7 +360,31 @@ mod tests {
         assert_eq!(actor.spawned_by, principal);
         assert_eq!(actor.config.model, Some(ModelTier::Aux));
         assert!(actor.config.persistent);
+        assert!(actor.config.background);
         assert!(actor.config.tools.contains(&"todo_list".to_string()));
+    }
+
+    #[test]
+    fn dmn_events_carry_background_markers() {
+        let (mut registry, principal) = registry();
+        let dmn = ensure_dmn_actor(&mut registry, &principal).unwrap();
+        queue_dmn_heartbeat_message(&mut registry, &principal, &dmn, "heartbeat", "").unwrap();
+
+        let spawned = registry
+            .events
+            .query(Some("actor_spawned"), Some(&dmn), None, 1);
+        assert_eq!(spawned[0].payload["is_background"], json!(true));
+        let principal_spawned =
+            registry
+                .events
+                .query(Some("actor_spawned"), Some(&principal), None, 1);
+        assert_eq!(principal_spawned[0].payload["is_background"], json!(false));
+
+        let kickoff = registry
+            .events
+            .query(Some("actor_message"), Some(&principal), None, 1);
+        assert_eq!(kickoff[0].payload["source"], json!("background_heartbeat"));
+        assert_eq!(kickoff[0].payload["kind"], json!("heartbeat"));
     }
 
     #[test]

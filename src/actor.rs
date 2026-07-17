@@ -295,6 +295,10 @@ pub struct ActorConfig {
     pub max_turns: usize,
     pub max_messages: usize,
     pub persistent: bool,
+    /// System-driven background actor (DMN reflector, future proactivity):
+    /// consumers route its activity out of user-facing surfaces.
+    #[serde(default)]
+    pub background: bool,
 }
 
 impl ActorConfig {
@@ -308,6 +312,7 @@ impl ActorConfig {
             max_turns: 20,
             max_messages: 50,
             persistent: false,
+            background: false,
         }
     }
 

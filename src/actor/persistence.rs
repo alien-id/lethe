@@ -58,9 +58,9 @@ impl ActorStore {
             "INSERT OR REPLACE INTO actors (
                 id, name, group_name, goals, spawned_by, is_principal, state,
                 task_state, task_state_note, turn_count, max_turns, max_messages,
-                model, tools, persistent, outcome, result, last_response,
+                model, tools, persistent, background, outcome, result, last_response,
                 created_at, terminated_at, updated_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)",
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)",
             params![
                 actor.id,
                 actor.config.name,
@@ -77,6 +77,7 @@ impl ActorStore {
                 actor.config.model.map(intent_model_name),
                 tools_json,
                 actor.config.persistent as i64,
+                actor.config.background as i64,
                 actor.outcome.map(|outcome| outcome.as_str()),
                 actor.result(),
                 last_self_response_text(actor),
@@ -100,7 +101,7 @@ impl ActorStore {
             .prepare(
                 "SELECT id, name, group_name, goals, spawned_by, task_state,
                         task_state_note, turn_count, max_turns, max_messages,
-                        model, tools, persistent, last_response, created_at
+                        model, tools, persistent, background, last_response, created_at
                  FROM actors
                  WHERE state != 'terminated' AND is_principal = 0",
             )
@@ -120,6 +121,7 @@ impl ActorStore {
                 config.max_turns = row.get::<_, i64>("max_turns")?.max(1) as usize;
                 config.max_messages = row.get::<_, i64>("max_messages")?.max(1) as usize;
                 config.persistent = row.get::<_, i64>("persistent")? != 0;
+                config.background = row.get::<_, i64>("background")? != 0;
                 let task_state_raw: String = row.get("task_state")?;
                 let actor = Actor {
                     id: row.get("id")?,
@@ -172,6 +174,7 @@ impl ActorStore {
                 model TEXT,
                 tools TEXT NOT NULL DEFAULT '[]',
                 persistent INTEGER NOT NULL DEFAULT 0,
+                background INTEGER NOT NULL DEFAULT 0,
                 outcome TEXT,
                 result TEXT,
                 last_response TEXT,
@@ -181,6 +184,19 @@ impl ActorStore {
             );",
         )
         .map_err(sql_error)?;
+        // Migration for databases created before background actors existed.
+        let has_background = conn
+            .prepare("SELECT 1 FROM pragma_table_info('actors') WHERE name = 'background'")
+            .map_err(sql_error)?
+            .exists([])
+            .map_err(sql_error)?;
+        if !has_background {
+            conn.execute(
+                "ALTER TABLE actors ADD COLUMN background INTEGER NOT NULL DEFAULT 0",
+                [],
+            )
+            .map_err(sql_error)?;
+        }
         Ok(())
     }
 
@@ -250,6 +266,7 @@ mod tests {
             ActorConfig::new("researcher", "Survey embedding crates").in_group("main");
         worker_config.max_turns = 7;
         worker_config.tools = vec!["web_search".to_string()];
+        worker_config.background = true;
         let worker = registry.spawn(worker_config, Some(&principal), false);
         let finished = registry.spawn(
             ActorConfig::new("done-already", "Old job").in_group("main"),
@@ -273,6 +290,7 @@ mod tests {
         assert_eq!(actor.config.goals, "Survey embedding crates");
         assert_eq!(actor.config.max_turns, 7);
         assert_eq!(actor.config.tools, vec!["web_search".to_string()]);
+        assert!(actor.config.background);
         assert_eq!(actor.state, ActorState::Waiting);
 
         // Upsert: persisting again with new state replaces the row.
@@ -285,5 +303,47 @@ mod tests {
         store
             .persist(registry.get(&worker).unwrap())
             .expect("re-persist is an upsert, not a duplicate insert");
+    }
+
+    #[test]
+    fn opening_a_pre_background_database_adds_the_column() {
+        let tmp = tempdir().unwrap();
+        let db_path = tmp.path().join("actors.db");
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE actors (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                group_name TEXT NOT NULL,
+                goals TEXT NOT NULL,
+                spawned_by TEXT NOT NULL DEFAULT '',
+                is_principal INTEGER NOT NULL DEFAULT 0,
+                state TEXT NOT NULL,
+                task_state TEXT NOT NULL,
+                task_state_note TEXT NOT NULL DEFAULT '',
+                turn_count INTEGER NOT NULL DEFAULT 0,
+                max_turns INTEGER NOT NULL DEFAULT 20,
+                max_messages INTEGER NOT NULL DEFAULT 50,
+                model TEXT,
+                tools TEXT NOT NULL DEFAULT '[]',
+                persistent INTEGER NOT NULL DEFAULT 0,
+                outcome TEXT,
+                result TEXT,
+                last_response TEXT,
+                created_at TEXT NOT NULL,
+                terminated_at TEXT,
+                updated_at TEXT NOT NULL
+            );
+            INSERT INTO actors (id, name, group_name, goals, state, task_state, created_at, updated_at)
+            VALUES ('old-1', 'researcher', 'main', 'Old job', 'waiting', 'running',
+                    '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');",
+        )
+        .unwrap();
+        drop(conn);
+
+        let store = ActorStore::open(&db_path).unwrap();
+        let restored = store.load_unfinished().unwrap();
+        assert_eq!(restored.len(), 1);
+        assert!(!restored[0].actor.config.background);
     }
 }
