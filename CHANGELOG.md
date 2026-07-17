@@ -1,5 +1,37 @@
 # Changelog
 
+## 0.27.0 - Typed background actor markers, client reply keyboards, full tool previews
+
+- **Background/system activity is now typed on the actor event wire**
+  (closes #44). `actor_spawned` and `actor_restored` payloads carry
+  `is_background`, backed by a new `ActorConfig::background` flag set for
+  the DMN reflector (and any future system-driven actor) — consumers no
+  longer need to hardcode the `"dmn"` name. `actor_message` payloads
+  forward the message metadata's `source`/`kind`, so the DMN heartbeat
+  kickoff (`source: "background_heartbeat", kind: "heartbeat"`) and
+  subagent termination notices (`source: "termination"`) are
+  distinguishable without content sniffing. The flag persists through the
+  actor store (new `background` column, migrated on open), so restored
+  DMN actors keep it across restarts. All fields are additive; lethe-mux
+  passes them through unchanged.
+- **`chat_send_message` accepts `reply_markup_json`** (#42, thanks
+  @zasulskii). The shared executor and client egress already handled
+  keyboards; the tool spec now declares the param, so the model can offer
+  quick-reply buttons on web/desktop chat sessions, not just Telegram.
+  Optional — omitting it sends a plain message as before.
+- **Tool previews streamed to UI clients grew 200 chars → 16 KB** (#43,
+  thanks @alekseiEti). `tool.start`/`tool.end` args and output previews
+  were cut mid-word at 200 chars in every UI; the cap is now a named
+  `TOOL_PREVIEW_CHARS = 16_384`, enough for real-world results while
+  still bounding pathological outputs. The model's own context was and
+  remains untruncated.
+- **Opening the browser drawer guarantees a live viewport.** When the
+  `/browser/stream` relay finds no dialable source it launches the shared
+  `main` session (headless, anonymous profile) and re-dials, with a 30s
+  backoff so the viewer's redial loop can't spawn-storm. Browser opens
+  are serialized behind a process-wide lock and reuse a live daemon,
+  making `alien_browser_open` safe against double-opens.
+
 ## 0.26.0 - GPT-5.x via Responses API, genai 0.6.5, OpenRouter prompt caching, sealed-browser forms
 
 - **gpt-5.x agent turns work again.** OpenAI's Chat Completions endpoint
