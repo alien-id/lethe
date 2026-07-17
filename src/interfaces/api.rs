@@ -283,6 +283,16 @@ impl ApiState {
         sender.send(ApiEvent::new(event, data)).await.is_ok()
     }
 
+    /// Mirror an event onto the durable `/events` broadcast (per-user). Turn
+    /// events go to the per-request `/chat` SSE, which dies on reload; the
+    /// broadcast survives reloads, so a reloaded/second tab can re-attach to a
+    /// running turn (thinking indicator, tool pills, final reply). The owning
+    /// tab ignores these while its own `/chat` stream is live (see the UI's
+    /// `streamingRef` gate) so nothing double-renders. Sync + best-effort.
+    fn broadcast_events(&self, event: &str, data: Value) {
+        let _ = self.stream_tx.send(ApiEvent::new(event, data));
+    }
+
     /// Deliver to the chat's CURRENT session, whichever request that is by
     /// now. Turn output must use this, not the session that originated the
     /// turn: a message sent mid-turn replaces the SSE, and events pinned to
@@ -343,11 +353,20 @@ struct ApiTurnObserver {
     /// message sent during a long turn rendered nothing).
     sessions: Arc<Mutex<ApiSessions>>,
     chat_id: i64,
+    broadcast: broadcast::Sender<ApiEvent>,
 }
 
 impl ApiTurnObserver {
-    fn new(sessions: Arc<Mutex<ApiSessions>>, chat_id: i64) -> Self {
-        Self { sessions, chat_id }
+    fn new(
+        sessions: Arc<Mutex<ApiSessions>>,
+        chat_id: i64,
+        broadcast: broadcast::Sender<ApiEvent>,
+    ) -> Self {
+        Self {
+            sessions,
+            chat_id,
+            broadcast,
+        }
     }
 
     /// Deliver to the chat's CURRENT session. Observer methods are sync, so
@@ -368,6 +387,14 @@ impl ApiTurnObserver {
         drop(sessions);
         let _ = sender.try_send(event);
     }
+
+    /// Also mirror tool lifecycle onto the durable `/events` broadcast so a
+    /// reloaded/second tab shows tool activity for a turn it doesn't own.
+    /// Deltas/reasoning are deliberately NOT broadcast (per-token volume); the
+    /// final `text` mirror carries the full reply.
+    fn mirror(&self, event: ApiEvent) {
+        let _ = self.broadcast.send(event);
+    }
 }
 
 impl TurnObserver for ApiTurnObserver {
@@ -376,14 +403,16 @@ impl TurnObserver for ApiTurnObserver {
     }
 
     fn on_tool_start(&self, name: &str, call_id: &str, args_preview: &str) {
-        self.deliver(ApiEvent::new(
+        let ev = ApiEvent::new(
             "tool.start",
             json!({
                 "name": name,
                 "call_id": call_id,
                 "args_preview": args_preview,
             }),
-        ));
+        );
+        self.deliver(ev.clone());
+        self.mirror(ev);
     }
 
     fn on_tool_end(
@@ -394,7 +423,7 @@ impl TurnObserver for ApiTurnObserver {
         output_preview: &str,
         duration_ms: u128,
     ) {
-        self.deliver(ApiEvent::new(
+        let ev = ApiEvent::new(
             "tool.end",
             json!({
                 "name": name,
@@ -403,7 +432,9 @@ impl TurnObserver for ApiTurnObserver {
                 "output_preview": output_preview,
                 "duration_ms": duration_ms as u64,
             }),
-        ));
+        );
+        self.deliver(ev.clone());
+        self.mirror(ev);
     }
 
     fn on_assistant_delta(&self, content: &str) {
@@ -768,9 +799,14 @@ async fn process_chat_context(state: ApiState, context: ProcessContext) {
             json!({"chat_id": context.chat_id}),
         )
         .await;
+    // Durable mirror: tell reloaded/second tabs a turn is running so they can
+    // show the thinking indicator (the /chat SSE that owns the live stream
+    // dies on reload; /events survives).
+    state.broadcast_events("turn.active", json!({"active": true}));
     let observer: Option<SharedTurnObserver> = Some(Arc::new(ApiTurnObserver::new(
         state.sessions.clone(),
         context.chat_id,
+        state.stream_tx.clone(),
     )) as SharedTurnObserver);
     let tool_runtime = ToolRuntime {
         client: state
@@ -800,12 +836,18 @@ async fn process_chat_context(state: ApiState, context: ProcessContext) {
                     context.chat_id,
                     "text",
                     json!({
-                        "content": message,
+                        "content": &message,
                         "parse_mode": "Markdown",
                         "message_id": 0,
                     }),
                 )
                 .await;
+            // Durable mirror of the final reply so a reloaded/second tab
+            // renders it live (reuses the UI's existing `message` handler).
+            state.broadcast_events(
+                "message",
+                json!({"role": "assistant", "content": message}),
+            );
         }
         Ok(_) => {}
         Err(error) if !context.interrupt.is_interrupted() => {
@@ -838,6 +880,9 @@ async fn process_chat_context(state: ApiState, context: ProcessContext) {
     // way the stale-session bug did. The final turn of the run sends the done.
     if state.conversations.pending_count(context.chat_id).await == 0 {
         let _ = state.send_to_chat(context.chat_id, "done", json!({})).await;
+        // Clear the reloaded-tab thinking indicator only when the whole run is
+        // done (queued follow-up turns keep it active).
+        state.broadcast_events("turn.active", json!({"active": false}));
     }
     state.unregister_session(&session_id).await;
 }
