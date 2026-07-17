@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
+use futures_util::FutureExt;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::{Mutex, Notify};
@@ -348,8 +349,23 @@ impl ConversationManager {
                     }
                 };
 
-                if let Err(error) = callback(context.clone()).await {
-                    tracing::warn!(chat_id, error = ?error, "conversation processing callback failed");
+                // catch_unwind: a panic anywhere in the turn (the callback runs
+                // the ENTIRE agent turn) would kill this task with
+                // `is_processing` stuck true — the conversation then silently
+                // swallows every future message until the process restarts
+                // (observed live in prod). Contain it and let the loop reset
+                // state as usual.
+                match std::panic::AssertUnwindSafe(callback(context.clone()))
+                    .catch_unwind()
+                    .await
+                {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => {
+                        tracing::warn!(chat_id, error = ?error, "conversation processing callback failed");
+                    }
+                    Err(_panic) => {
+                        tracing::error!(chat_id, "conversation processing callback panicked");
+                    }
                 }
 
                 let mut state = state.lock().await;

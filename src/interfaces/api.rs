@@ -283,6 +283,25 @@ impl ApiState {
         sender.send(ApiEvent::new(event, data)).await.is_ok()
     }
 
+    /// Deliver to the chat's CURRENT session, whichever request that is by
+    /// now. Turn output must use this, not the session that originated the
+    /// turn: a message sent mid-turn replaces the SSE, and events pinned to
+    /// the originating session vanish into the closed stream.
+    async fn send_to_chat(&self, chat_id: i64, event: &str, data: Value) -> bool {
+        let sender = {
+            let sessions = self.sessions.lock().await;
+            sessions
+                .by_chat
+                .get(&chat_id)
+                .and_then(|id| sessions.by_id.get(id))
+                .map(|session| session.sender.clone())
+        };
+        let Some(sender) = sender else {
+            return false;
+        };
+        sender.send(ApiEvent::new(event, data)).await.is_ok()
+    }
+
     async fn client_tool_context(
         &self,
         session_id: &str,
@@ -317,12 +336,37 @@ async fn close_sender(sender: mpsc::Sender<ApiEvent>) {
 /// session sender is the same `mpsc::Sender` used for `text`/`typing_*`,
 /// so tool cards appear inline with the assistant transcript on the TUI.
 struct ApiTurnObserver {
-    sender: mpsc::Sender<ApiEvent>,
+    /// Live session registry, NOT a frozen sender: the user can replace their
+    /// SSE mid-turn (every new /chat message does), and a captured sender
+    /// would keep streaming the rest of the turn into the dead old stream —
+    /// the UI then looks frozen while the agent works (observed live: every
+    /// message sent during a long turn rendered nothing).
+    sessions: Arc<Mutex<ApiSessions>>,
+    chat_id: i64,
 }
 
 impl ApiTurnObserver {
-    fn new(sender: mpsc::Sender<ApiEvent>) -> Self {
-        Self { sender }
+    fn new(sessions: Arc<Mutex<ApiSessions>>, chat_id: i64) -> Self {
+        Self { sessions, chat_id }
+    }
+
+    /// Deliver to the chat's CURRENT session. Observer methods are sync, so
+    /// use try_lock + try_send; on contention or a full queue the event is
+    /// dropped, same as the previous try_send semantics.
+    fn deliver(&self, event: ApiEvent) {
+        let Ok(sessions) = self.sessions.try_lock() else {
+            return;
+        };
+        let Some(sender) = sessions
+            .by_chat
+            .get(&self.chat_id)
+            .and_then(|id| sessions.by_id.get(id))
+            .map(|session| session.sender.clone())
+        else {
+            return;
+        };
+        drop(sessions);
+        let _ = sender.try_send(event);
     }
 }
 
@@ -332,7 +376,7 @@ impl TurnObserver for ApiTurnObserver {
     }
 
     fn on_tool_start(&self, name: &str, call_id: &str, args_preview: &str) {
-        let _ = self.sender.try_send(ApiEvent::new(
+        self.deliver(ApiEvent::new(
             "tool.start",
             json!({
                 "name": name,
@@ -350,7 +394,7 @@ impl TurnObserver for ApiTurnObserver {
         output_preview: &str,
         duration_ms: u128,
     ) {
-        let _ = self.sender.try_send(ApiEvent::new(
+        self.deliver(ApiEvent::new(
             "tool.end",
             json!({
                 "name": name,
@@ -366,7 +410,7 @@ impl TurnObserver for ApiTurnObserver {
         if content.is_empty() {
             return;
         }
-        let _ = self.sender.try_send(ApiEvent::new(
+        self.deliver(ApiEvent::new(
             "assistant.delta",
             json!({"content": content}),
         ));
@@ -376,7 +420,7 @@ impl TurnObserver for ApiTurnObserver {
         if content.is_empty() {
             return;
         }
-        let _ = self.sender.try_send(ApiEvent::new(
+        self.deliver(ApiEvent::new(
             "assistant.reasoning",
             json!({"content": content}),
         ));
@@ -646,6 +690,7 @@ async fn chat(
 
     let chat_id = body.chat_id.unwrap_or(body.user_id);
     let (sender, mut receiver) = mpsc::channel::<ApiEvent>(SESSION_QUEUE_DEPTH);
+    let mid_turn = state.conversations.is_processing(chat_id).await;
     let session_id = state.register_session(chat_id, sender).await;
     body.metadata
         .insert("_api_session_id".to_string(), json!(session_id.clone()));
@@ -661,6 +706,16 @@ async fn chat(
             Some(callback),
         )
         .await;
+    if mid_turn {
+        // The message interrupts a running turn: it was queued, and the
+        // in-flight turn's remaining output now lands on THIS session (see
+        // send_to_chat). Ack immediately so the new stream isn't byte-less
+        // until the next observer event — a silent stream reads as "no
+        // response" (its only traffic would be the 15s SSE keepalive).
+        let _ = state
+            .send_to_session(&session_id, "typing_start", json!({}))
+            .await;
+    }
 
     let stream_state = state.clone();
     let stream_session_id = session_id.clone();
@@ -704,21 +759,19 @@ async fn process_chat_context(state: ApiState, context: ProcessContext) {
     }
 
     let _ = state
-        .send_to_session(&session_id, "typing_start", json!({}))
+        .send_to_chat(context.chat_id, "typing_start", json!({}))
         .await;
     let _ = state
-        .send_to_session(
-            &session_id,
+        .send_to_chat(
+            context.chat_id,
             "turn.start",
             json!({"chat_id": context.chat_id}),
         )
         .await;
-    let observer: Option<SharedTurnObserver> = {
-        let sessions = state.sessions.lock().await;
-        sessions.by_id.get(&session_id).map(|session| {
-            Arc::new(ApiTurnObserver::new(session.sender.clone())) as SharedTurnObserver
-        })
-    };
+    let observer: Option<SharedTurnObserver> = Some(Arc::new(ApiTurnObserver::new(
+        state.sessions.clone(),
+        context.chat_id,
+    )) as SharedTurnObserver);
     let tool_runtime = ToolRuntime {
         client: state
             .client_tool_context(
@@ -743,8 +796,8 @@ async fn process_chat_context(state: ApiState, context: ProcessContext) {
         // research turn whose answer only ever existed after a page reload).
         Ok(message) if !message.trim().is_empty() => {
             let _ = state
-                .send_to_session(
-                    &session_id,
+                .send_to_chat(
+                    context.chat_id,
                     "text",
                     json!({
                         "content": message,
@@ -757,8 +810,8 @@ async fn process_chat_context(state: ApiState, context: ProcessContext) {
         Ok(_) => {}
         Err(error) if !context.interrupt.is_interrupted() => {
             let _ = state
-                .send_to_session(
-                    &session_id,
+                .send_to_chat(
+                    context.chat_id,
                     "text",
                     json!({
                         "content": format!("Error: {error}"),
@@ -773,13 +826,19 @@ async fn process_chat_context(state: ApiState, context: ProcessContext) {
 
     if let Some(tokens) = state.agent.last_prompt_tokens() {
         let _ = state
-            .send_to_session(&session_id, "usage", json!({"prompt_tokens": tokens}))
+            .send_to_chat(context.chat_id, "usage", json!({"prompt_tokens": tokens}))
             .await;
     }
     let _ = state
-        .send_to_session(&session_id, "typing_stop", json!({}))
+        .send_to_chat(context.chat_id, "typing_stop", json!({}))
         .await;
-    let _ = state.send_to_session(&session_id, "done", json!({})).await;
+    // `done` ends the client stream. When messages are already queued behind
+    // this turn (typed mid-turn), the SAME stream must survive to carry the
+    // next turn's output — closing it here would orphan that turn exactly the
+    // way the stale-session bug did. The final turn of the run sends the done.
+    if state.conversations.pending_count(context.chat_id).await == 0 {
+        let _ = state.send_to_chat(context.chat_id, "done", json!({})).await;
+    }
     state.unregister_session(&session_id).await;
 }
 
