@@ -167,14 +167,49 @@ pub async fn run_json(bin: Bin, state_dir: &Path, args: &[&str]) -> Value {
     }
 }
 
+/// Serializes every `agent-id-browser open` (agent tool calls AND the
+/// viewer-triggered launch in `interfaces::browser_stream`). The CLI's `open`
+/// is NOT idempotent — it wipes the session work dir and unseals fresh, so a
+/// concurrent second open destroys a live session's profile dir.
+static OPEN_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// The live half of `browser-sessions/<name>.json`: a session whose daemon
+/// pid is still running. Linux-only pid probe (/proc) — on other platforms we
+/// report None and `open` behaves as before (hosted runtimes are linux).
+pub fn live_session(state_dir: &Path, name: &str) -> Option<Value> {
+    let raw =
+        std::fs::read_to_string(state_dir.join("browser-sessions").join(format!("{name}.json")))
+            .ok()?;
+    let info = serde_json::from_str::<Value>(&raw).ok()?;
+    let pid = info.get("pid").and_then(Value::as_u64)?;
+    if !cfg!(target_os = "linux") || !Path::new(&format!("/proc/{pid}")).exists() {
+        return None;
+    }
+    Some(info)
+}
+
 /// Start a long-lived browser session daemon (`agent-id-browser open`), read its
 /// `{ ready: true, ... }` line, then leave it running and drain the rest of its
 /// stdout to a log so it never blocks on a full pipe. Returns the ready line.
+///
+/// Idempotent per session: if `session_name` already has a live daemon, the
+/// existing session is returned (`reused: true`) instead of re-opening over it.
 pub async fn spawn_daemon_ready(
     state_dir: &Path,
+    session_name: &str,
     args: &[&str],
     log_path: PathBuf,
 ) -> Result<Value, String> {
+    let _open_serialized = OPEN_LOCK.lock().await;
+    if let Some(info) = live_session(state_dir, session_name) {
+        return Ok(json!({
+            "ok": true,
+            "ready": true,
+            "reused": true,
+            "session": session_name,
+            "headless": info.get("headless").cloned().unwrap_or(Value::Bool(true)),
+        }));
+    }
     let mut cmd = base_command(Bin::Browser, state_dir)?;
     // The daemon must OUTLIVE this call: do not kill it when the child handle
     // drops.

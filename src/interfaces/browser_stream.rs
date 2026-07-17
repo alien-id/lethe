@@ -86,20 +86,70 @@ async fn send_status(client: &mut WebSocket, state: &str, source: Option<&str>) 
     let _ = client.send(AxMessage::Text(body.to_string().into())).await;
 }
 
+/// Failed viewer-triggered launches back off here — the viewer redials every
+/// ~4s, and a persistent failure (locked vault, missing Chrome) must not spawn
+/// an open attempt per redial.
+static LAUNCH_FAIL_UNTIL: std::sync::Mutex<Option<std::time::Instant>> =
+    std::sync::Mutex::new(None);
+
+/// A viewer is watching but nothing is browsing: open the shared `main`
+/// session (anonymous auto-created profile, headless) so the drawer always has
+/// a live viewport. Idempotent — `spawn_daemon_ready` reuses a live session
+/// and serializes against agent-initiated opens.
+async fn launch_main_session() -> bool {
+    {
+        let until = LAUNCH_FAIL_UNTIL.lock().unwrap();
+        if until.is_some_and(|t| std::time::Instant::now() < t) {
+            return false;
+        }
+    }
+    let sd = crate::agent_id::cached_state_dir();
+    let log_dir = sd.join("browser-logs");
+    if let Err(error) = std::fs::create_dir_all(&log_dir) {
+        tracing::warn!(%error, "viewer browser launch: log dir");
+        return false;
+    }
+    match crate::agent_id::cli::spawn_daemon_ready(
+        &sd,
+        "main",
+        &["open", "--name", "main"],
+        log_dir.join("open-main.log"),
+    )
+    .await
+    {
+        Ok(_) => true,
+        Err(error) => {
+            tracing::warn!(%error, "viewer-triggered browser launch failed");
+            *LAUNCH_FAIL_UNTIL.lock().unwrap() =
+                Some(std::time::Instant::now() + std::time::Duration::from_secs(30));
+            false
+        }
+    }
+}
+
 /// Runs for the lifetime of one viewer connection. Dial failures across all
 /// candidates are reported as `no_browser` (the daemons only listen while a
 /// session is open, so a refused connection IS the "not browsing" signal).
 pub async fn relay(mut client: WebSocket, requested_source: Option<String>) {
-    let mut upstream = None;
-    for source in candidates(requested_source.as_deref()) {
-        match tokio_tungstenite::connect_async(&source.url).await {
-            Ok((stream, _)) => {
-                upstream = Some((source.name, stream));
-                break;
+    let dial = |sources: Vec<Source>| async move {
+        for source in sources {
+            match tokio_tungstenite::connect_async(&source.url).await {
+                Ok((stream, _)) => return Some((source.name, stream)),
+                Err(error) => {
+                    tracing::debug!(source = source.name, %error, "browser stream dial failed");
+                }
             }
-            Err(error) => {
-                tracing::debug!(source = source.name, %error, "browser stream dial failed");
-            }
+        }
+        None
+    };
+    let mut upstream = dial(candidates(requested_source.as_deref())).await;
+    if upstream.is_none() && requested_source.as_deref().is_none_or(|s| s == "alien") {
+        // Viewer wants to watch but nothing is browsing — start the shared
+        // `main` session (launch takes a few seconds; the socket stays open so
+        // the client just sees a longer "connecting").
+        send_status(&mut client, "starting", None).await;
+        if launch_main_session().await {
+            upstream = dial(candidates(requested_source.as_deref())).await;
         }
     }
     let Some((source_name, upstream)) = upstream else {

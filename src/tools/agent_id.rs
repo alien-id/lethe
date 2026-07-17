@@ -440,6 +440,7 @@ fn exec_browser_open<'a>(r: &'a ToolRegistry<'a>, args: &'a Value) -> BoxFuture<
         let log = log_dir.join(format!("open-{}.log", sanitize_session_name(&name)));
         match cli::spawn_daemon_ready(
             &sd,
+            &name,
             &argv.iter().map(String::as_str).collect::<Vec<_>>(),
             log,
         )
