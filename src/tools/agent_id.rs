@@ -288,6 +288,30 @@ fn exec_vault_add<'a>(r: &'a ToolRegistry<'a>, args: &'a Value) -> BoxFuture<'a>
         let Some(cred_type) = nonempty_string(args, "type") else {
             return err("`type` is required (e.g. bearer, basic, header, oauth2, login, totp).");
         };
+        // Re-adding an existing credential re-raises the owner-facing secret
+        // form — a confused model looping on vault_add freezes the whole
+        // conversation for 15 minutes per attempt. Short-circuit with the
+        // stored entry unless the model explicitly asks to overwrite.
+        if !bool_arg(args, "overwrite", false) {
+            let listing = cli::run_json(Bin::Vault, &sd, &["list"]).await;
+            let existing = listing
+                .get("credentials")
+                .and_then(Value::as_array)
+                .and_then(|creds| {
+                    creds
+                        .iter()
+                        .find(|c| c.get("name").and_then(Value::as_str) == Some(name.as_str()))
+                });
+            if let Some(existing) = existing {
+                return json!({
+                    "ok": true,
+                    "already_stored": true,
+                    "credential": existing,
+                    "note": "A credential with this name ALREADY EXISTS, secrets included — the owner does not need to enter anything. Do NOT call vault_add for it again; use it directly (alien_browser_auto_login / alien_browser_login). Pass overwrite=true ONLY if the owner explicitly said the stored secret is wrong.",
+                })
+                .to_string();
+            }
+        }
         let domains = string_vec_arg(args, "domains");
         let mut argv = vec![
             "add".to_string(),
@@ -817,6 +841,10 @@ pub const TOOL_DEFS: &[ToolDef] = &[
             p_str(
                 "login_url",
                 "For type=login only: the sign-in page URL (e.g. https://www.reddit.com/login). REQUIRED for alien_browser_auto_login to work — set it whenever you add a login credential you'll log in with.",
+            ),
+            p_bool(
+                "overwrite",
+                "Replace an existing credential of the same name (re-prompts the owner for secrets). Only when the owner explicitly says the stored secret is wrong or changed — adding an existing name without this returns the stored entry instead.",
             ),
         ],
         category: ToolCategory::AgentId,
