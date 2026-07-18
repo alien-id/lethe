@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::actor::ActorRuntime;
 use crate::interfaces::telegram::TelegramToolContext;
@@ -33,6 +34,27 @@ mod tests;
 
 pub type SharedActorRegistry = ActorRuntime;
 
+/// Deployment-wide opt-in: `HostedSafe` turns may also use the Exa-backed web
+/// tools (`web_search`, `fetch_webpage`) and the `research` harness built on
+/// them. Process-global rather than threaded through `ToolRuntime` on purpose:
+/// every internally constructed turn (subagents, DMN, heartbeats) must see the
+/// same answer, and a per-turn field that defaults to "off" would silently
+/// strip the tools from exactly those paths. The host sets it once at startup.
+static HOSTED_WEB_TOOLS: AtomicBool = AtomicBool::new(false);
+
+/// Called by a hosted multiplexer at startup, before any turn runs. The web
+/// tools read `EXA_API_KEY` from the process environment, so enabling this
+/// without that key yields tools that always return a configuration error.
+pub fn set_hosted_web_tools(enabled: bool) {
+    HOSTED_WEB_TOOLS.store(enabled, Ordering::Relaxed);
+}
+
+pub fn hosted_web_tools_enabled() -> bool {
+    HOSTED_WEB_TOOLS.load(Ordering::Relaxed)
+}
+
+const HOSTED_WEB_TOOL_NAMES: &[&str] = &["web_search", "fetch_webpage", "research"];
+
 /// Controls which built-in capabilities exist for a turn. `HostedSafe` is an
 /// allowlist enforced both while schemas are assembled and again at dispatch,
 /// so a model cannot invoke a hidden local capability by name. It retains the
@@ -47,6 +69,13 @@ pub enum ToolPolicy {
 
 impl ToolPolicy {
     fn allows_builtin(self, name: &str) -> bool {
+        self.allows_builtin_with(name, hosted_web_tools_enabled())
+    }
+
+    /// Pure form of the policy check; `hosted_web` mirrors
+    /// [`hosted_web_tools_enabled`] so tests can cover both switch states
+    /// without mutating process-global state.
+    fn allows_builtin_with(self, name: &str, hosted_web: bool) -> bool {
         match self {
             Self::Full => true,
             Self::HostedSafe => {
@@ -86,6 +115,12 @@ impl ToolPolicy {
                                 | crate::tools::spec::ToolCategory::ActorSubagent
                         )
                     })
+                    // Exa-backed web reading (and the research harness, whose
+                    // hypothesis subagents re-enter this gate for web_search /
+                    // fetch_webpage) is a deployment opt-in: the host decides
+                    // whether hosted tenants may reach the public web through
+                    // the shared EXA_API_KEY.
+                    || (hosted_web && HOSTED_WEB_TOOL_NAMES.contains(&name))
             }
         }
     }

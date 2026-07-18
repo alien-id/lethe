@@ -279,7 +279,22 @@ fn hosted_safe_policy_exposes_memory_but_blocks_local_execution() {
     assert!(ToolPolicy::HostedSafe.allows_builtin("write_file"));
     assert!(ToolPolicy::HostedSafe.allows_builtin("view_image"));
     assert!(!ToolPolicy::HostedSafe.allows_builtin("bash"));
+    // Web tools are a deployment opt-in, off unless the host enables them.
+    assert!(!hosted_web_tools_enabled());
     assert!(!ToolPolicy::HostedSafe.allows_builtin("web_search"));
+    for name in ["web_search", "fetch_webpage", "research"] {
+        assert!(
+            !ToolPolicy::HostedSafe.allows_builtin_with(name, false),
+            "{name} must stay blocked while the web-tools switch is off"
+        );
+        assert!(
+            ToolPolicy::HostedSafe.allows_builtin_with(name, true),
+            "{name} must be allowed once the host opts in"
+        );
+    }
+    // The switch widens the hosted allowlist by exactly the web family.
+    assert!(!ToolPolicy::HostedSafe.allows_builtin_with("bash", true));
+    assert!(!ToolPolicy::HostedSafe.allows_builtin_with("browser_open", true));
     // The removed standalone browser family must not resurface under policy.
     assert!(!ToolPolicy::HostedSafe.allows_builtin("browser_open"));
     assert!(!ToolPolicy::HostedSafe.allows_builtin("browser_snapshot"));
