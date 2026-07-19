@@ -863,6 +863,12 @@ pub fn prepare_turn(
         .saturating_sub(settings.llm.llm_max_output as u64)
         .saturating_mul(CHARS_PER_TOKEN as u64) as usize;
     clamp_messages_to_budget(&mut messages, max_total_chars);
+    // Final guard, independent of the budget paths above: the first non-system
+    // message must never be an orphaned `tool_result`. A turn interrupted
+    // mid-tool-call (e.g. the process was killed before the result was paired)
+    // can persist a half-pair; without this one such record wedges every later
+    // turn with an Anthropic 400 ("tool_result without tool_use").
+    drop_leading_orphan_tool_results(&mut messages);
 
     Ok(AgentTurn {
         messages,
@@ -1548,13 +1554,36 @@ fn clamp_messages_to_budget(messages: &mut Vec<LlmMessage>, max_total_chars: usi
     }
 }
 
+/// Final assembly guard: drop any leading orphaned `tool_result` messages so the
+/// first non-system message is never a `tool_result`. The truncation paths
+/// (`compact_history`, `clamp_messages_to_budget`) try to keep tool_use↔tool_result
+/// pairs intact, but a turn interrupted mid-tool-call can persist a half-pair in
+/// stored history; Anthropic then 400s ("tool_result without tool_use") on every
+/// subsequent turn until the orphan ages out. This makes that unrepresentable.
+fn drop_leading_orphan_tool_results(messages: &mut Vec<LlmMessage>) {
+    let start = messages
+        .iter()
+        .position(|message| message.role != LlmRole::System)
+        .unwrap_or(messages.len());
+    while start < messages.len() && !messages[start].tool_responses.is_empty() {
+        messages.remove(start);
+    }
+}
+
 fn drop_oldest_to_target(messages: &mut Vec<LlmMessage>, target_chars: usize) -> Vec<LlmMessage> {
     // Always keep at least the last two messages so the LLM has SOME
     // immediate context to react to.
     const MIN_RETAINED: usize = 2;
     let proposed = weighted_keep_cutoff(messages, target_chars);
-    let cutoff =
-        pair_safe_cutoff(messages, proposed).min(messages.len().saturating_sub(MIN_RETAINED));
+    // Apply the MIN_RETAINED clamp BEFORE the pair-safety walk. Taking `.min()`
+    // *after* `pair_safe_cutoff` could lower the cutoff onto a non-pair-safe
+    // index — splitting an assistant `tool_call` from its `tool_result` and
+    // leaving the kept history starting on an orphaned `tool_result` (Anthropic
+    // 400). Running `pair_safe_cutoff` last guarantees the final cutoff never
+    // splits a pair; since it only ever lowers the cutoff, at least MIN_RETAINED
+    // messages are still retained.
+    let bounded = proposed.min(messages.len().saturating_sub(MIN_RETAINED));
+    let cutoff = pair_safe_cutoff(messages, bounded);
 
     let mut dropped = Vec::with_capacity(cutoff);
     for _ in 0..cutoff {
@@ -2125,6 +2154,62 @@ mod tests {
         assert!(messages.iter().all(|m| m.tool_responses.is_empty()));
         assert!(messages.iter().all(|m| m.tool_calls.is_empty()));
         assert_eq!(messages.first().unwrap().role, LlmRole::System);
+        assert_eq!(messages.last().unwrap().content, "CURRENT");
+    }
+
+    #[test]
+    fn drop_oldest_to_target_never_leaves_leading_orphan_via_min_retained() {
+        // The MIN_RETAINED clamp must not be able to lower the cutoff onto a
+        // tool_results boundary. Here a naive `pair_safe_cutoff(..).min(len-2)`
+        // would keep [tool_results(c2), CURRENT] — a leading orphan; applying
+        // pair_safe_cutoff AFTER the clamp must keep the whole c2 pair instead.
+        let call = |id: &str| HistoricalToolCall {
+            call_id: id.into(),
+            fn_name: "read_file".into(),
+            fn_arguments: json!({}),
+            thought_signatures: None,
+        };
+        let resp = |id: &str| HistoricalToolResponse {
+            call_id: id.into(),
+            content: "r".repeat(50),
+            source_message_id: Some("m".into()),
+        };
+        let mut messages = vec![
+            LlmMessage::assistant_with_tool_calls("a".repeat(50), vec![call("c1")]),
+            LlmMessage::tool_results(vec![resp("c1")]),
+            LlmMessage::assistant_with_tool_calls("a".repeat(50), vec![call("c2")]),
+            LlmMessage::tool_results(vec![resp("c2")]),
+            LlmMessage::user("CURRENT".to_string()),
+        ];
+        // Tiny target forces dropping down toward MIN_RETAINED.
+        let _ = drop_oldest_to_target(&mut messages, 1);
+        assert!(
+            messages
+                .first()
+                .map(|m| m.tool_responses.is_empty())
+                .unwrap_or(true),
+            "kept history must not start with an orphaned tool_result (role={:?})",
+            messages.first().map(|m| m.role.clone())
+        );
+        assert_eq!(messages.last().unwrap().content, "CURRENT");
+    }
+
+    #[test]
+    fn drop_leading_orphan_tool_results_strips_leading_orphan() {
+        // A crash-persisted half-pair can put a tool_result first; the guard
+        // must remove it so the wire never starts with a dangling tool_result.
+        let mut messages = vec![
+            LlmMessage::system("S"),
+            LlmMessage::tool_results(vec![HistoricalToolResponse {
+                call_id: "orphan".into(),
+                content: "stale".into(),
+                source_message_id: Some("m1".into()),
+            }]),
+            LlmMessage::user("CURRENT".to_string()),
+        ];
+        drop_leading_orphan_tool_results(&mut messages);
+        assert_eq!(messages.first().unwrap().role, LlmRole::System);
+        assert!(messages.iter().all(|m| m.tool_responses.is_empty()));
         assert_eq!(messages.last().unwrap().content, "CURRENT");
     }
 

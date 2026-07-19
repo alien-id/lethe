@@ -1795,16 +1795,48 @@ fn merge_anthropic_messages(messages: Vec<Value>) -> Vec<Value> {
 }
 
 fn drop_leading_non_user_messages(messages: &mut Vec<Value>) {
-    let first_user = messages
-        .iter()
-        .position(|message| message.get("role").and_then(Value::as_str) == Some("user"));
-    match first_user {
-        Some(0) => {}
-        Some(index) => {
-            messages.drain(0..index);
+    // Anthropic requires the conversation to begin with a user turn, so we drop
+    // leading non-user messages. But a leading `assistant` message may carry
+    // `tool_use` blocks whose `tool_result`s are the *next* (user-role) message;
+    // dropping that assistant orphans those results, and Anthropic 400s on a
+    // leading `tool_result` with no preceding `tool_use`. So after draining to
+    // the first user message, drop it too if it still carries a tool_result (its
+    // producing assistant is gone), then re-scan. Each step removes at least one
+    // message, so this terminates. (Without the loop, the second call site —
+    // after clean_orphaned_tool_pairs has shifted an assistant_tool_use to the
+    // front — would re-orphan a tool_result with nothing left to clean it up.)
+    loop {
+        match messages
+            .iter()
+            .position(|message| message.get("role").and_then(Value::as_str) == Some("user"))
+        {
+            None => {
+                messages.clear();
+                return;
+            }
+            Some(index) => {
+                if index > 0 {
+                    messages.drain(0..index);
+                }
+                if message_contains_tool_result(&messages[0]) {
+                    messages.remove(0);
+                    continue;
+                }
+                return;
+            }
         }
-        None => messages.clear(),
     }
+}
+
+fn message_contains_tool_result(message: &Value) -> bool {
+    message
+        .get("content")
+        .and_then(Value::as_array)
+        .is_some_and(|content| {
+            content
+                .iter()
+                .any(|block| block.get("type").and_then(Value::as_str) == Some("tool_result"))
+        })
 }
 
 fn merge_message_content(previous: &mut Value, next: &Value) {
@@ -2481,6 +2513,47 @@ fn into_message_content(content: String, attachments: Vec<LlmAttachment>) -> Mes
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn drop_leading_non_user_messages_drops_orphaned_tool_results() {
+        // A leading assistant(tool_use) whose results are the next (user-role)
+        // message: dropping the assistant to satisfy "start with user" must also
+        // drop the now-orphaned tool_result, else Anthropic 400s on messages.0.
+        let mut messages = vec![
+            json!({"role": "assistant", "content": [{"type": "tool_use", "id": "X", "name": "bash", "input": {}}]}),
+            json!({"role": "user", "content": [{"type": "tool_result", "tool_use_id": "X", "content": "out"}]}),
+            json!({"role": "user", "content": "real question"}),
+        ];
+        drop_leading_non_user_messages(&mut messages);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0]["role"], "user");
+        assert_eq!(messages[0]["content"], json!("real question"));
+    }
+
+    #[test]
+    fn drop_leading_non_user_messages_drops_consecutive_orphans_but_keeps_real_user() {
+        // Two orphaned tool_result turns in a row, then a real user message.
+        let mut messages = vec![
+            json!({"role": "assistant", "content": [{"type": "tool_use", "id": "A", "name": "f", "input": {}}]}),
+            json!({"role": "user", "content": [{"type": "tool_result", "tool_use_id": "A", "content": "a"}]}),
+            json!({"role": "user", "content": [{"type": "tool_result", "tool_use_id": "B", "content": "b"}]}),
+            json!({"role": "user", "content": "hello"}),
+        ];
+        drop_leading_non_user_messages(&mut messages);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0]["content"], json!("hello"));
+    }
+
+    #[test]
+    fn drop_leading_non_user_messages_keeps_a_clean_leading_user() {
+        let mut messages = vec![
+            json!({"role": "user", "content": "hi"}),
+            json!({"role": "assistant", "content": "hey"}),
+        ];
+        drop_leading_non_user_messages(&mut messages);
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0]["content"], json!("hi"));
+    }
 
     #[test]
     fn aux_model_falls_back_to_main_model() {
