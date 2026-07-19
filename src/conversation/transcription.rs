@@ -13,14 +13,19 @@ use crate::config::Settings;
 
 pub const OPENAI_TRANSCRIPTIONS_URL: &str = "https://api.openai.com/v1/audio/transcriptions";
 pub const OPENROUTER_TRANSCRIPTIONS_URL: &str = "https://openrouter.ai/api/v1/audio/transcriptions";
+// Mistral's transcription endpoint is OpenAI-compatible: multipart/form-data
+// (model + file), bearer auth, OpenAI-shaped JSON with a top-level `text` field.
+pub const MISTRAL_TRANSCRIPTIONS_URL: &str = "https://api.mistral.ai/v1/audio/transcriptions";
 
 pub const DEFAULT_OPENAI_MODEL: &str = "whisper-1";
 pub const DEFAULT_OPENROUTER_MODEL: &str = "openai/whisper-large-v3";
 pub const DEFAULT_LOCAL_MODEL: &str = "base";
+// Voxtral Mini Transcribe — strong multilingual (DE/FR/IT) speech-to-text.
+pub const DEFAULT_MISTRAL_MODEL: &str = "voxtral-mini-latest";
 
 #[derive(Debug, Error)]
 pub enum TranscriptionError {
-    #[error("unsupported TRANSCRIPTION_PROVIDER '{0}'. Use local, openai, or openrouter")]
+    #[error("unsupported TRANSCRIPTION_PROVIDER '{0}'. Use local, openai, openrouter, or mistral")]
     UnsupportedProvider(String),
     #[error(
         "speech-to-text is not configured. Set OPENROUTER_API_KEY or OPENAI_API_KEY, or set TRANSCRIPTION_PROVIDER=local with a local Whisper CLI installed"
@@ -54,6 +59,7 @@ pub type TranscriptionResult<T> = Result<T, TranscriptionError>;
 pub enum TranscriptionProvider {
     OpenRouter,
     OpenAi,
+    Mistral,
     Local,
 }
 
@@ -63,6 +69,7 @@ impl TranscriptionProvider {
             "" | "auto" => Ok(None),
             "openrouter" => Ok(Some(Self::OpenRouter)),
             "openai" => Ok(Some(Self::OpenAi)),
+            "mistral" => Ok(Some(Self::Mistral)),
             "local" => Ok(Some(Self::Local)),
             other => Err(TranscriptionError::UnsupportedProvider(other.to_string())),
         }
@@ -72,6 +79,7 @@ impl TranscriptionProvider {
         match self {
             Self::OpenRouter => "openrouter",
             Self::OpenAi => "openai",
+            Self::Mistral => "mistral",
             Self::Local => "local",
         }
     }
@@ -100,6 +108,9 @@ pub fn choose_transcription_provider(
     if configured_api_key(&settings.llm.openai_api_key) {
         return Ok(TranscriptionProvider::OpenAi);
     }
+    if configured_api_key(&settings.llm.mistral_api_key) {
+        return Ok(TranscriptionProvider::Mistral);
+    }
     if local_whisper_available(&settings.transcription.local_command) {
         return Ok(TranscriptionProvider::Local);
     }
@@ -110,6 +121,7 @@ pub fn default_model_for_provider(provider: TranscriptionProvider) -> &'static s
     match provider {
         TranscriptionProvider::OpenRouter => DEFAULT_OPENROUTER_MODEL,
         TranscriptionProvider::OpenAi => DEFAULT_OPENAI_MODEL,
+        TranscriptionProvider::Mistral => DEFAULT_MISTRAL_MODEL,
         TranscriptionProvider::Local => DEFAULT_LOCAL_MODEL,
     }
 }
@@ -203,14 +215,27 @@ pub fn transcribe_audio(
             &openrouter_transcriptions_url(settings),
             &openrouter_transcription_key(settings)?,
         ),
-        TranscriptionProvider::OpenAi => transcribe_openai(
+        TranscriptionProvider::OpenAi => transcribe_multipart(
             audio_bytes,
             filename,
             &audio_format,
             mime_type,
             &model,
             language,
+            OPENAI_TRANSCRIPTIONS_URL,
             &api_key_for_provider(provider, settings)?,
+            "OpenAI",
+        ),
+        TranscriptionProvider::Mistral => transcribe_multipart(
+            audio_bytes,
+            filename,
+            &audio_format,
+            mime_type,
+            &model,
+            language,
+            MISTRAL_TRANSCRIPTIONS_URL,
+            &api_key_for_provider(provider, settings)?,
+            "Mistral",
         ),
     }
 }
@@ -258,14 +283,21 @@ fn transcribe_openrouter(
     }
 }
 
-fn transcribe_openai(
+/// Shared multipart `/v1/audio/transcriptions` path for OpenAI-compatible
+/// providers (OpenAI Whisper and Mistral Voxtral). Both accept the same
+/// multipart form (model + file + optional language) and return an
+/// OpenAI-shaped JSON body with a top-level `text` field; only the endpoint
+/// URL, bearer key, and provider label differ.
+fn transcribe_multipart(
     audio_bytes: &[u8],
     filename: &str,
     audio_format: &str,
     mime_type: Option<&str>,
     model: &str,
     language: Option<&str>,
+    url: &str,
     api_key: &str,
+    provider_label: &str,
 ) -> TranscriptionResult<String> {
     let upload_name = filename_for_upload(filename, audio_format);
     let part = multipart::Part::bytes(audio_bytes.to_vec())
@@ -279,12 +311,12 @@ fn transcribe_openai(
         form = form.text("language", language.to_string());
     }
     let response = reqwest::blocking::Client::new()
-        .post(OPENAI_TRANSCRIPTIONS_URL)
+        .post(url)
         .bearer_auth(api_key)
         .multipart(form)
         .send()?;
     if !response.status().is_success() {
-        return Err(provider_error("OpenAI", response));
+        return Err(provider_error(provider_label, response));
     }
     let text = response
         .json::<serde_json::Value>()?
@@ -295,7 +327,7 @@ fn transcribe_openai(
         .to_string();
     if text.is_empty() {
         Err(TranscriptionError::Provider {
-            provider: "OpenAI".to_string(),
+            provider: provider_label.to_string(),
             message: "returned an empty transcription".to_string(),
         })
     } else {
@@ -457,6 +489,16 @@ fn api_key_for_provider(
                 ))
             }
         }
+        TranscriptionProvider::Mistral => {
+            if configured_api_key(&settings.llm.mistral_api_key) {
+                Ok(settings.llm.mistral_api_key.clone())
+            } else {
+                Err(TranscriptionError::MissingApiKey(
+                    "MISTRAL_API_KEY",
+                    provider.as_str().to_string(),
+                ))
+            }
+        }
         TranscriptionProvider::Local => Ok(String::new()),
     }
 }
@@ -553,6 +595,49 @@ mod tests {
             choose_transcription_provider(&settings).unwrap(),
             TranscriptionProvider::Local
         );
+
+        settings.transcription.provider = "mistral".to_string();
+        assert_eq!(
+            choose_transcription_provider(&settings).unwrap(),
+            TranscriptionProvider::Mistral
+        );
+    }
+
+    #[test]
+    fn mistral_provider_parses_round_trips_and_auto_selects() {
+        assert_eq!(
+            TranscriptionProvider::parse("mistral").unwrap(),
+            Some(TranscriptionProvider::Mistral)
+        );
+        assert_eq!(
+            TranscriptionProvider::parse("MISTRAL").unwrap(),
+            Some(TranscriptionProvider::Mistral)
+        );
+        assert_eq!(TranscriptionProvider::Mistral.as_str(), "mistral");
+
+        // With only a Mistral key configured (no openrouter/openai, no local
+        // whisper, empty provider), auto-detection selects Mistral.
+        let mut settings = settings();
+        settings.transcription.provider.clear();
+        settings.llm.openrouter_api_key = String::new();
+        settings.llm.openai_api_key = String::new();
+        settings.llm.mistral_api_key = "mi-key".to_string();
+        settings.transcription.local_command = "/definitely/not/a/whisper".to_string();
+        assert_eq!(
+            choose_transcription_provider(&settings).unwrap(),
+            TranscriptionProvider::Mistral
+        );
+        assert_eq!(
+            api_key_for_provider(TranscriptionProvider::Mistral, &settings).unwrap(),
+            "mi-key"
+        );
+
+        // An unset key surfaces a MISSING MISTRAL_API_KEY error.
+        settings.llm.mistral_api_key = String::new();
+        assert!(matches!(
+            api_key_for_provider(TranscriptionProvider::Mistral, &settings),
+            Err(TranscriptionError::MissingApiKey("MISTRAL_API_KEY", _))
+        ));
     }
 
     #[test]
@@ -626,6 +711,10 @@ mod tests {
         assert_eq!(
             default_model_for_provider(TranscriptionProvider::Local),
             DEFAULT_LOCAL_MODEL
+        );
+        assert_eq!(
+            default_model_for_provider(TranscriptionProvider::Mistral),
+            DEFAULT_MISTRAL_MODEL
         );
     }
 

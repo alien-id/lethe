@@ -44,6 +44,9 @@ pub struct Paths {
 pub struct LlmConfig {
     pub openrouter_api_key: String,
     pub openai_api_key: String,
+    /// Mistral API key — used only for Voxtral speech-to-text transcription
+    /// (TRANSCRIPTION_PROVIDER=mistral), not for the chat LLM.
+    pub mistral_api_key: String,
     pub opencode_go_api_key: String,
     pub llm_model: String,
     pub llm_model_aux: String,
@@ -253,6 +256,7 @@ impl Settings {
             llm: LlmConfig {
                 openrouter_api_key: env_string("OPENROUTER_API_KEY", ""),
                 openai_api_key: env_string("OPENAI_API_KEY", ""),
+                mistral_api_key: env_string("MISTRAL_API_KEY", ""),
                 opencode_go_api_key: env_string("OPENCODE_GO_API_KEY", ""),
                 llm_model: env_string("LLM_MODEL", ""),
                 llm_model_aux: env_string("LLM_MODEL_AUX", ""),
@@ -389,6 +393,7 @@ pub fn test_settings(root: &std::path::Path) -> Settings {
         llm: LlmConfig {
             openrouter_api_key: String::new(),
             openai_api_key: String::new(),
+            mistral_api_key: String::new(),
             opencode_go_api_key: String::new(),
             llm_model: "test-model".to_string(),
             llm_model_aux: String::new(),
