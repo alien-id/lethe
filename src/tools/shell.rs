@@ -607,6 +607,18 @@ fn shell_command(command: &str, cwd: &Path) -> Command {
     cmd
 }
 
+/// Compute the `kill` target that signals the whole process group led by `pid`.
+/// Returns `None` for a degenerate pid (`0` or `1`): `format!("-{pid}")` would
+/// expand to `-0` — our OWN process group — or `-1` — *every* process we are
+/// permitted to signal. `kill(-1, SIGKILL)` would take down the agent process
+/// itself (and, run natively rather than inside the sandboxed container, every
+/// other process the user owns). A group created via `process_group(0)` always
+/// has pgid == the child's pid, which is necessarily > 1, so `pid <= 1` means the
+/// pid was never set / was lost and the group teardown must be skipped entirely.
+fn kill_group_target(pid: u32) -> Option<String> {
+    (pid > 1).then(|| format!("-{pid}"))
+}
+
 /// SIGKILL the entire process group led by `pid` (created via `process_group(0)`).
 /// Best-effort. A negative target tells `kill` to signal the whole group, which
 /// reaps any child the command backgrounded — both to honor the timeout and to
@@ -614,9 +626,12 @@ fn shell_command(command: &str, cwd: &Path) -> Command {
 fn kill_process_group(pid: u32) {
     #[cfg(unix)]
     {
+        let Some(target) = kill_group_target(pid) else {
+            return;
+        };
         let _ = Command::new("kill")
             .arg("-KILL")
-            .arg(format!("-{pid}"))
+            .arg(target)
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status();
@@ -907,6 +922,17 @@ mod tests {
             .nth(1)
             .and_then(|rest| rest.split('"').next())
             .unwrap_or_else(|| panic!("no shell_id in: {start:?}"))
+    }
+
+    #[test]
+    fn kill_group_target_refuses_degenerate_pids() {
+        // `-0` would signal our own process group; `-1` would signal every
+        // process we may signal (kill the agent itself). Both must be skipped.
+        assert_eq!(kill_group_target(0), None);
+        assert_eq!(kill_group_target(1), None);
+        // A real child pid (always > 1) targets that group and nothing else.
+        assert_eq!(kill_group_target(2), Some("-2".to_string()));
+        assert_eq!(kill_group_target(197918), Some("-197918".to_string()));
     }
 
     #[test]
