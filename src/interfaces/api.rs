@@ -21,6 +21,7 @@ use crate::actor::ActorEvent;
 use crate::agent::{Agent, TurnRequest};
 use crate::config::Settings;
 use crate::conversation::{ConversationManager, ProcessCallback, ProcessContext};
+use crate::interfaces::telegram::TelegramToolContext;
 use crate::llm::models::{available_providers, normalize_model_id, provider_for_model};
 use crate::memory::StoredMessage;
 use crate::scheduler::brainstem::{BrainstemEmission, BrainstemHandle};
@@ -517,6 +518,7 @@ pub fn router(state: ApiState) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/chat", post(chat))
+        .route("/wake", post(wake))
         .route("/cancel", post(cancel))
         .route("/configure", post(configure))
         .route("/model", get(model_get).post(model_post))
@@ -1226,6 +1228,88 @@ fn presented_api_token(headers: &HeaderMap) -> String {
         .to_string()
 }
 
+#[derive(Debug, Deserialize)]
+struct WakeRequest {
+    /// Prompt that drives the turn (e.g. "produce Philipp's morning brief and
+    /// telegram_send_message it").
+    message: String,
+    /// Telegram chat to deliver to. Defaults to the single configured allowed
+    /// user (in a private chat the chat id equals the user id).
+    #[serde(default)]
+    chat_id: Option<i64>,
+}
+
+/// Proactive wake: run ONE agent turn bound to the real Telegram egress, so an
+/// external scheduler (cron-mcp) can trigger a brief that actually reaches the
+/// user.
+///
+/// `/chat` exists for an interactive API client (a web UI/TUI): its egress is a
+/// `ClientToolContext` that streams tool output back over the HTTP/SSE response.
+/// When the caller is a fire-and-forget webhook, that stream is discarded, so a
+/// `telegram_send_message` during the turn went nowhere (it returned a stub
+/// success with chat_id 0 — the silent drop). `/wake` instead installs a
+/// `TelegramToolContext`, which `message_egress()` prefers over the client
+/// egress, so the agent's `telegram_send_message` is delivered to Telegram.
+async fn wake(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Json(body): Json<WakeRequest>,
+) -> Response {
+    if let Some(response) = require_auth(&state, &headers) {
+        return response;
+    }
+    if body.message.trim().is_empty() {
+        return json_error(StatusCode::BAD_REQUEST, "message is required");
+    }
+    let token = state.settings.telegram.bot_token.clone();
+    if token.trim().is_empty() {
+        return json_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Telegram bot token is not configured",
+        );
+    }
+    let chat_id = body
+        .chat_id
+        .or_else(|| state.settings.telegram.allowed_user_ids.first().copied())
+        .unwrap_or(0);
+    if chat_id == 0 {
+        return json_error(
+            StatusCode::BAD_REQUEST,
+            "no chat_id given and no allowed user configured to deliver to",
+        );
+    }
+
+    // Bind the turn to the real Telegram egress. message_egress() prefers
+    // runtime.telegram over the SSE client egress, so telegram_send_message
+    // reaches Telegram instead of a discarded response stream.
+    let runtime = ToolRuntime {
+        telegram: Some(TelegramToolContext {
+            token,
+            chat_id,
+            user_id: Some(chat_id),
+            last_message_id: None,
+            guard: None,
+            dry_run: false,
+            sent_messages: None,
+        }),
+        ..ToolRuntime::default()
+    };
+    let req = TurnRequest::new(&body.message).with_runtime(runtime);
+
+    match state.agent.chat_once(req).await {
+        Ok(reply) => Json(json!({
+            "success": true,
+            "chat_id": chat_id,
+            "reply_chars": reply.chars().count(),
+        }))
+        .into_response(),
+        Err(error) => json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("turn failed: {error}"),
+        ),
+    }
+}
+
 fn json_error(status: StatusCode, message: &str) -> Response {
     (status, Json(json!({"error": message}))).into_response()
 }
@@ -1344,6 +1428,43 @@ mod tests {
         let event = ApiEvent::new("text", json!({"content": "hello"}));
         assert_eq!(event.event, "text");
         assert_eq!(event.data["content"], "hello");
+    }
+
+    #[tokio::test]
+    async fn wake_requires_auth() {
+        let tmp = tempdir().unwrap();
+        let state = ApiState::from_settings(test_settings(tmp.path())).unwrap();
+        let resp = wake(
+            State(state),
+            HeaderMap::new(), // no token presented
+            Json(WakeRequest {
+                message: "hi".into(),
+                chat_id: None,
+            }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn wake_rejects_empty_message() {
+        let tmp = tempdir().unwrap();
+        let state = ApiState::from_settings(test_settings(tmp.path())).unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer secret"),
+        );
+        let resp = wake(
+            State(state),
+            headers,
+            Json(WakeRequest {
+                message: "   ".into(),
+                chat_id: None,
+            }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
