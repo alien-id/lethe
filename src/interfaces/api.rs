@@ -851,6 +851,21 @@ async fn process_chat_context(state: ApiState, context: ProcessContext) {
         }
         Ok(_) => {}
         Err(error) if !context.interrupt.is_interrupted() => {
+            // Log the failure to journal so it's visible to operators —
+            // the SSE error frame below is the only signal the API caller
+            // sees, but operators debugging the running process have only
+            // journalctl to go on. Without this, a streaming 400 / 5xx
+            // from the upstream LLM provider gets surfaced to the user
+            // but leaves no trace in the service log (observed: hours of
+            // intermittent `Error: LLM streaming chat request failed`
+            // visible client-side with zero corresponding entries in
+            // `journalctl --user -u lethe`, making the root cause
+            // invisible without enabling LLM_DEBUG).
+            tracing::warn!(
+                session = %session_id,
+                error = format!("{error:#}"),
+                "api chat response delivery failed"
+            );
             let _ = state
                 .send_to_chat(
                     context.chat_id,

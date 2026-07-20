@@ -1321,10 +1321,30 @@ impl CompactionBudget {
 fn compact_history(messages: &mut Vec<LlmMessage>, budget: CompactionBudget) -> Vec<LlmMessage> {
     archive_old_tool_results(messages, budget.max_tool_result_inline_chars());
     archive_old_images(messages);
-    if total_chars(messages) <= budget.trigger_chars() {
-        return Vec::new();
+    let dropped = if total_chars(messages) <= budget.trigger_chars() {
+        Vec::new()
+    } else {
+        drop_oldest_to_target(messages, budget.keep_chars())
+    };
+    // Final safety belt: never leave a leading orphan tool_result, no matter
+    // what upstream path produced one. Anthropic 400s on
+    //   `messages.0.content.0: unexpected tool_use_id found in tool_result blocks`
+    // when the first wire message contains a tool_result block. The primary
+    // defense is pair_safe_cutoff inside drop_oldest_to_target; this is the
+    // belt-and-suspenders catch for any other origin (mid-turn stream
+    // interrupts, partial saves, race conditions in tool_loop, etc.).
+    let mut stripped = 0usize;
+    while messages
+        .first()
+        .is_some_and(|m| !m.tool_responses.is_empty())
+    {
+        messages.remove(0);
+        stripped += 1;
     }
-    drop_oldest_to_target(messages, budget.keep_chars())
+    if stripped > 0 {
+        tracing::warn!(stripped, "compact_history: stripped leading orphan tool_result(s)");
+    }
+    dropped
 }
 
 fn message_chars(message: &LlmMessage) -> usize {
@@ -1458,13 +1478,27 @@ fn weighted_keep_cutoff(messages: &[LlmMessage], target_chars: usize) -> usize {
 
 /// Adjust the proposed cutoff so we never split a tool_call/tool_result
 /// pair across the kept/dropped boundary. Back up until the boundary
-/// neither cuts off a trailing assistant_tool_calls nor starts with a
-/// leading tool_results.
+/// neither cuts off a trailing assistant_tool_calls (would leave a
+/// dangling tool_use) nor starts with a leading tool_results (would
+/// produce an orphan tool_result with no preceding tool_use — Anthropic
+/// rejects this with 400 `unexpected tool_use_id found in tool_result
+/// blocks`).
+///
+/// The loop also handles `cutoff == messages.len()` (drop everything):
+/// even though there's no kept message to inspect, we still must not
+/// have the *last dropped* message be an assistant_with_tool_calls,
+/// because callers cap the final cutoff to leave a `MIN_RETAINED`
+/// trailing window — and after that cap, what was "going to be dropped"
+/// can become "kept", surfacing the orphan.
 fn pair_safe_cutoff(messages: &[LlmMessage], proposed: usize) -> usize {
-    let mut cutoff = proposed;
-    while cutoff > 0 && cutoff < messages.len() {
-        let prev_has_calls = !messages[cutoff - 1].tool_calls.is_empty();
-        let at_has_responses = !messages[cutoff].tool_responses.is_empty();
+    let mut cutoff = proposed.min(messages.len());
+    while cutoff > 0 {
+        let prev_has_calls = messages
+            .get(cutoff - 1)
+            .is_some_and(|m| !m.tool_calls.is_empty());
+        let at_has_responses = messages
+            .get(cutoff)
+            .is_some_and(|m| !m.tool_responses.is_empty());
         if prev_has_calls || at_has_responses {
             cutoff -= 1;
         } else {
@@ -1553,8 +1587,15 @@ fn drop_oldest_to_target(messages: &mut Vec<LlmMessage>, target_chars: usize) ->
     // immediate context to react to.
     const MIN_RETAINED: usize = 2;
     let proposed = weighted_keep_cutoff(messages, target_chars);
-    let cutoff =
-        pair_safe_cutoff(messages, proposed).min(messages.len().saturating_sub(MIN_RETAINED));
+    // Cap to MIN_RETAINED FIRST, then ask pair_safe_cutoff to back up from
+    // the actual cutoff that will be used. The previous order silently
+    // dropped the pair-safety guarantee when the `.min()` cap moved cutoff
+    // off the pair-safe value pair_safe_cutoff had computed — observed in
+    // production as Anthropic 400 `unexpected tool_use_id found in
+    // tool_result blocks` because the final kept window started with an
+    // orphan tool_result.
+    let capped = proposed.min(messages.len().saturating_sub(MIN_RETAINED));
+    let cutoff = pair_safe_cutoff(messages, capped);
 
     let mut dropped = Vec::with_capacity(cutoff);
     for _ in 0..cutoff {
@@ -2034,6 +2075,118 @@ mod tests {
         assert!(total_chars(&messages) <= budget.max_history_chars);
         // Newest messages survived; the "recent-marker" anchor is still there.
         assert!(messages.iter().any(|m| m.content == "recent-marker"));
+    }
+
+    /// Regression: Anthropic returns 400 `unexpected tool_use_id found in
+    /// tool_result blocks` when the wire body's `messages[0]` is a tool_result
+    /// — every tool_result block must have a matching tool_use in the
+    /// PREVIOUS message, and messages[0] has no previous message. Before this
+    /// fix, drop_oldest_to_target could land here because pair_safe_cutoff
+    /// ran BEFORE the `.min(len - MIN_RETAINED)` cap, so the cap could move
+    /// cutoff off the pair-safe value silently.
+    #[test]
+    fn drop_oldest_to_target_never_leaves_orphan_tool_result_as_first_kept() {
+        // Build a history whose final MIN_RETAINED=2 messages are
+        // (tool_result, user). If drop_oldest_to_target naively kept the
+        // last 2, messages[0] would be the orphan tool_result.
+        let chunk = "z".repeat(2_000);
+        let mut messages = vec![
+            // Lots of older context so weighted_keep_cutoff wants to drop all.
+            LlmMessage::user(chunk.clone()),
+            LlmMessage::assistant(chunk.clone()),
+            LlmMessage::user(chunk.clone()),
+            LlmMessage::assistant(chunk.clone()),
+            // The pair we're worried about — assistant_with_tool_calls
+            // followed by its tool_results.
+            LlmMessage::assistant_with_tool_calls(
+                "running",
+                vec![HistoricalToolCall {
+                    call_id: "c1".to_string(),
+                    fn_name: "bash".to_string(),
+                    fn_arguments: json!({}),
+                    thought_signatures: None,
+                }],
+            ),
+            LlmMessage::tool_results(vec![HistoricalToolResponse {
+                call_id: "c1".to_string(),
+                content: "ok".to_string(),
+                source_message_id: Some("msg-tr".to_string()),
+            }]),
+            // The most recent user message.
+            LlmMessage::user("latest".to_string()),
+        ];
+
+        // A budget tight enough that we want to drop almost everything.
+        let budget = CompactionBudget {
+            max_history_chars: 200,
+        };
+        let _ = drop_oldest_to_target(&mut messages, budget.keep_chars());
+
+        // Whatever survives, messages[0] must NOT be a tool_result (i.e.
+        // must not have tool_responses) — Anthropic rejects this.
+        assert!(
+            messages.first().is_some_and(|m| m.tool_responses.is_empty()),
+            "first kept message has orphan tool_responses: {:?}",
+            messages.first().map(|m| m.tool_responses.len())
+        );
+        // And the last message (the most recent) survived.
+        assert_eq!(messages.last().map(|m| m.content.as_str()), Some("latest"));
+    }
+
+    /// Belt-and-suspenders: if `messages` arrives at compact_history with a
+    /// leading orphan tool_result (any origin — mid-turn stream interrupts,
+    /// partial saves, etc.), compact_history must strip it before returning.
+    #[test]
+    fn compact_history_strips_leading_orphan_tool_result_regardless_of_origin() {
+        let mut messages = vec![
+            // Orphan: no preceding assistant_with_tool_calls.
+            LlmMessage::tool_results(vec![HistoricalToolResponse {
+                call_id: "orphan".to_string(),
+                content: "ok".to_string(),
+                source_message_id: None,
+            }]),
+            LlmMessage::user("hello".to_string()),
+            LlmMessage::assistant("hi".to_string()),
+        ];
+        let _ = compact_history(&mut messages, CompactionBudget::legacy_default());
+        assert!(
+            messages.first().is_some_and(|m| m.tool_responses.is_empty()),
+            "compact_history left an orphan tool_result at messages[0]"
+        );
+    }
+
+    #[test]
+    fn pair_safe_cutoff_clamps_proposed_above_len_and_backs_up_off_orphan() {
+        let messages = vec![
+            LlmMessage::user("u1".to_string()),
+            LlmMessage::assistant_with_tool_calls(
+                "a1",
+                vec![HistoricalToolCall {
+                    call_id: "c".to_string(),
+                    fn_name: "bash".to_string(),
+                    fn_arguments: json!({}),
+                    thought_signatures: None,
+                }],
+            ),
+            LlmMessage::tool_results(vec![HistoricalToolResponse {
+                call_id: "c".to_string(),
+                content: "ok".to_string(),
+                source_message_id: None,
+            }]),
+        ];
+
+        // Out-of-range proposed must be clamped to len; with cutoff == len the
+        // kept slice is empty so there's nothing to back up off of.
+        assert_eq!(pair_safe_cutoff(&messages, 100), messages.len());
+        // Proposed = 2 would leave messages[2] (tool_results) as first kept —
+        // an orphan. The function must back up past the pair to cutoff = 1.
+        assert_eq!(pair_safe_cutoff(&messages, 2), 1);
+        // Proposed = 1 already gives a clean cut (kept slice starts at the
+        // assistant_with_tool_calls, which has the matching tool_results
+        // immediately after — a complete pair, not an orphan tail).
+        assert_eq!(pair_safe_cutoff(&messages, 1), 1);
+        // Proposed = 0 means drop nothing — pass through.
+        assert_eq!(pair_safe_cutoff(&messages, 0), 0);
     }
 
     #[test]

@@ -964,6 +964,27 @@ impl AnthropicOAuthClient {
         }
         if !status.is_success() {
             let text = response.text().await.unwrap_or_default();
+            // Log the failing wire body + response so we can diagnose
+            // recurring 400s (e.g. orphan tool_result at messages[0])
+            // even on the streaming OAuth path — without this nothing
+            // hits log_llm_interaction on the streaming error path and
+            // the wire body that produced the 400 is invisible.
+            log_llm_interaction(
+                "chat_anthropic_oauth_stream_error",
+                model,
+                json!({
+                    "auth": "anthropic_oauth",
+                    "endpoint": format!("{ANTHROPIC_MESSAGES_URL}?beta=true&stream=true"),
+                    "model": model,
+                    "body": body.clone(),
+                }),
+                json!({
+                    "ok": false,
+                    "status": status.as_u16(),
+                    "body": serde_json::from_str::<Value>(&text)
+                        .unwrap_or_else(|_| json!({"raw_text": text.clone()})),
+                }),
+            );
             return Err(anyhow!(
                 "Anthropic OAuth stream error: {} - {}",
                 status.as_u16(),
@@ -1608,7 +1629,19 @@ fn anthropic_request_body(model: &str, request: ChatRequest, options: &ChatOptio
         messages.push(json!({"role": "user", "content": "[No user message provided.]"}));
     }
     let mut messages = clean_orphaned_tool_pairs(messages);
-    drop_leading_non_user_messages(&mut messages);
+    // Iterate: drop_leading_non_user_messages can EXPOSE a new leading
+    // user-with-tool_result whose matching tool_use just got dropped (the
+    // preceding assistant), which Anthropic 400s on with
+    //   `messages.0.content.0: unexpected tool_use_id found in tool_result blocks`.
+    // After dropping leading non-user, strip any leading orphan tool_result
+    // blocks from the new first message; if that empties the message, drop
+    // it and repeat. Bounded: each iteration removes at least one element.
+    loop {
+        drop_leading_non_user_messages(&mut messages);
+        if !strip_leading_orphan_tool_results(&mut messages) {
+            break;
+        }
+    }
     if messages.is_empty() {
         messages.push(json!({"role": "user", "content": "[No user message provided.]"}));
     }
@@ -1792,6 +1825,52 @@ fn merge_anthropic_messages(messages: Vec<Value>) -> Vec<Value> {
         merged.push(message);
     }
     merged
+}
+
+/// Strip orphan `tool_result` blocks from `messages[0]` (a user message whose
+/// matching `assistant`+tool_use was just dropped by an earlier pass — e.g.
+/// `drop_leading_non_user_messages` removing a leading assistant whose
+/// tool_use the next user message references). Returns true if the function
+/// removed any content / messages, so the caller can re-run the
+/// `drop_leading_non_user_messages` pass if the head shifted.
+///
+/// Behaviour:
+/// - Only inspects the FIRST message. Orphan tool_results elsewhere in the
+///   body are still validated against the preceding assistant by
+///   `clean_orphaned_tool_pairs` — that handles the middle/tail.
+/// - If the first message has non-tool_result content (text, etc.) alongside
+///   orphan tool_results, the tool_results are stripped and the message stays.
+/// - If stripping leaves the first message empty, the whole message is
+///   removed.
+/// - If the first message has a string content (no blocks) or no array
+///   content, it is left alone.
+fn strip_leading_orphan_tool_results(messages: &mut Vec<Value>) -> bool {
+    let Some(first) = messages.first_mut() else {
+        return false;
+    };
+    if first.get("role").and_then(Value::as_str) != Some("user") {
+        return false;
+    }
+    let Some(content) = first.get("content").and_then(Value::as_array) else {
+        return false;
+    };
+    let has_tool_result = content
+        .iter()
+        .any(|block| block.get("type").and_then(Value::as_str) == Some("tool_result"));
+    if !has_tool_result {
+        return false;
+    }
+    let filtered: Vec<Value> = content
+        .iter()
+        .filter(|block| block.get("type").and_then(Value::as_str) != Some("tool_result"))
+        .cloned()
+        .collect();
+    if filtered.is_empty() {
+        messages.remove(0);
+    } else {
+        first["content"] = Value::Array(filtered);
+    }
+    true
 }
 
 fn drop_leading_non_user_messages(messages: &mut Vec<Value>) {
@@ -2481,6 +2560,136 @@ fn into_message_content(content: String, attachments: Vec<LlmAttachment>) -> Mes
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Regression: Anthropic 400 `messages.0.content.0: unexpected
+    /// tool_use_id found in tool_result blocks` was caused by
+    /// `drop_leading_non_user_messages` running AFTER
+    /// `clean_orphaned_tool_pairs`, which would strip a leading
+    /// `assistant_with_tool_use` and expose its paired
+    /// `user(tool_result)` as an orphan at `messages[0]`. The fix
+    /// loops drop-leading and a new strip pass until the head is
+    /// pair-safe.
+    #[test]
+    fn strip_leading_orphan_tool_results_removes_exposed_orphan() {
+        let mut messages = vec![
+            json!({
+                "role": "user",
+                "content": [
+                    {"type": "tool_result", "tool_use_id": "toolu_orphan", "content": "ok"}
+                ],
+            }),
+            json!({
+                "role": "assistant",
+                "content": [
+                    {"type": "text", "text": "thinking"},
+                    {"type": "tool_use", "id": "toolu_next", "name": "bash", "input": {}}
+                ],
+            }),
+        ];
+        assert!(strip_leading_orphan_tool_results(&mut messages));
+        // The first message had ONLY a tool_result, so it should be
+        // removed entirely, exposing the assistant. (The caller's loop
+        // then re-runs drop_leading_non_user_messages.)
+        assert_eq!(messages.len(), 1);
+        assert_eq!(
+            messages[0].get("role").and_then(Value::as_str),
+            Some("assistant")
+        );
+    }
+
+    #[test]
+    fn strip_leading_orphan_tool_results_keeps_text_alongside_orphan() {
+        let mut messages = vec![json!({
+            "role": "user",
+            "content": [
+                {"type": "tool_result", "tool_use_id": "toolu_orphan", "content": "ok"},
+                {"type": "text", "text": "next user prompt"}
+            ],
+        })];
+        assert!(strip_leading_orphan_tool_results(&mut messages));
+        // tool_result stripped, text content preserved.
+        assert_eq!(messages.len(), 1);
+        let content = messages[0].get("content").and_then(Value::as_array).unwrap();
+        assert_eq!(content.len(), 1);
+        assert_eq!(
+            content[0].get("type").and_then(Value::as_str),
+            Some("text")
+        );
+    }
+
+    #[test]
+    fn strip_leading_orphan_tool_results_noop_when_first_is_text_only() {
+        let mut messages = vec![json!({
+            "role": "user",
+            "content": [{"type": "text", "text": "hello"}],
+        })];
+        assert!(!strip_leading_orphan_tool_results(&mut messages));
+        assert_eq!(messages.len(), 1);
+    }
+
+    #[test]
+    fn strip_leading_orphan_tool_results_noop_when_first_is_assistant() {
+        let mut messages = vec![json!({
+            "role": "assistant",
+            "content": [{"type": "text", "text": "hi"}],
+        })];
+        assert!(!strip_leading_orphan_tool_results(&mut messages));
+    }
+
+    #[test]
+    fn anthropic_request_body_drops_chain_of_orphan_pairs_at_head() {
+        use genai::chat::{ChatMessage, ChatRequest, ContentPart, MessageContent, ToolCall, ToolResponse};
+        // Simulate the failure mode end-to-end: a sequence of
+        // (assistant_with_tool_use, user_with_tool_result) pairs at the
+        // front of history that should NOT survive once their leading
+        // assistant gets dropped by drop_leading_non_user_messages.
+        let req = ChatRequest::new(vec![
+            ChatMessage {
+                role: ChatRole::Assistant,
+                content: MessageContent::from_parts(vec![
+                    ContentPart::Text("a".to_string()),
+                    ContentPart::ToolCall(ToolCall {
+                        call_id: "toolu_A".to_string(),
+                        fn_name: "bash".to_string(),
+                        fn_arguments: json!({}),
+                        thought_signatures: None,
+                    }),
+                ]),
+                options: None,
+            },
+            ChatMessage {
+                role: ChatRole::Tool,
+                content: MessageContent::from_parts(vec![ContentPart::ToolResponse(
+                    ToolResponse::new("toolu_A".to_string(), "ok".to_string()),
+                )]),
+                options: None,
+            },
+            ChatMessage::user("real user input".to_string()),
+        ]);
+        let opts = ChatOptions::default();
+        let body = anthropic_request_body("claude-opus-4-8", req, &opts);
+        let msgs = body
+            .get("messages")
+            .and_then(Value::as_array)
+            .expect("messages");
+        // First wire-body message MUST NOT be a user-message-with-tool_result —
+        // Anthropic 400s on that. After the fix, the chained orphan pair
+        // gets fully stripped from the head and only the real user input
+        // remains.
+        let first = &msgs[0];
+        assert_eq!(first.get("role").and_then(Value::as_str), Some("user"));
+        let content = first
+            .get("content")
+            .and_then(Value::as_array)
+            .expect("content array");
+        for block in content {
+            assert_ne!(
+                block.get("type").and_then(Value::as_str),
+                Some("tool_result"),
+                "first wire-body message must not contain an orphan tool_result block"
+            );
+        }
+    }
 
     #[test]
     fn aux_model_falls_back_to_main_model() {
