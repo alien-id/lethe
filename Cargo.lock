@@ -2360,9 +2360,11 @@ dependencies = [
  "hkdf",
  "kameo",
  "libc",
+ "native-tls",
  "p256",
  "portable-pty",
  "postgres",
+ "postgres-native-tls",
  "pulldown-cmark",
  "r2d2",
  "r2d2_postgres",
@@ -3136,6 +3138,18 @@ dependencies = [
  "futures-util",
  "log",
  "tokio",
+ "tokio-postgres",
+]
+
+[[package]]
+name = "postgres-native-tls"
+version = "0.5.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fef4de47bb81477e0c3deaf153a1b10ae176484713ff1640969f4cb96b653ebc"
+dependencies = [
+ "native-tls",
+ "tokio",
+ "tokio-native-tls",
  "tokio-postgres",
 ]
 

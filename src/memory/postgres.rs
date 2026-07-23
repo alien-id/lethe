@@ -10,7 +10,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use chrono::{DateTime, NaiveDate, Utc};
-use postgres::{NoTls, Row, Transaction};
+use postgres::{Row, Transaction};
+use postgres_native_tls::MakeTlsConnector;
 use r2d2::Pool;
 use r2d2_postgres::PostgresConnectionManager;
 use serde_json::{Value, json};
@@ -38,11 +39,16 @@ use crate::todos::{
     NewTodo, Todo, TodoError, TodoFilter, TodoPriority, TodoResult, TodoStatus, TodoUpdate,
 };
 
-type PgPool = Pool<PostgresConnectionManager<NoTls>>;
+type PgPool = Pool<PostgresConnectionManager<MakeTlsConnector>>;
 
-#[derive(Debug)]
 struct PgPoolGuard {
     pool: Option<PgPool>,
+}
+
+impl std::fmt::Debug for PgPoolGuard {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PgPoolGuard").finish_non_exhaustive()
+    }
 }
 
 impl Deref for PgPoolGuard {
@@ -86,7 +92,15 @@ impl PostgresMemoryFactory {
         max_pool_size: u32,
     ) -> anyhow::Result<Self> {
         let config = database_url.parse()?;
-        let manager = PostgresConnectionManager::new(config, NoTls);
+        // libpq `sslmode=require` semantics: encrypt without CA verification —
+        // managed Postgres (RDS et al.) presents a CA outside the web-PKI roots.
+        // Whether TLS is used at all still follows the URL's sslmode.
+        let tls = MakeTlsConnector::new(
+            native_tls::TlsConnector::builder()
+                .danger_accept_invalid_certs(true)
+                .build()?,
+        );
+        let manager = PostgresConnectionManager::new(config, tls);
         Ok(Self {
             pool: Arc::new(PgPoolGuard {
                 pool: Some(
@@ -1441,7 +1455,7 @@ mod tests {
         };
         let first = Uuid::new_v4();
         let second = Uuid::new_v4();
-        let mut admin = postgres::Client::connect(&database_url, NoTls).unwrap();
+        let mut admin = postgres::Client::connect(&database_url, postgres::NoTls).unwrap();
         for (id, name) in [(first, "pg-memory-a"), (second, "pg-memory-b")] {
             admin
                 .execute(

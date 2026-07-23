@@ -12,7 +12,7 @@ path = "src/lib.rs"
 [features]
 default = ["fastembed"]
 fastembed = ["dep:fastembed", "dep:hf-hub"]
-postgres-memory = ["dep:postgres", "dep:r2d2", "dep:r2d2_postgres"]
+postgres-memory = ["dep:postgres", "dep:r2d2", "dep:r2d2_postgres", "dep:native-tls", "dep:postgres-native-tls"]
 
 [[bin]]
 name = "lethe"
@@ -38,9 +38,11 @@ hf-hub = { version = "0.5", optional = true }
 hkdf = "0.12"
 kameo = "0.20"
 libc = "0.2"
+native-tls = { version = "0.2", optional = true }
 p256 = { version = "0.13", features = ["ecdh"] }
 portable-pty = "0.8"
 postgres = { version = "0.19", features = ["with-chrono-0_4", "with-serde_json-1", "with-uuid-1"], optional = true }
+postgres-native-tls = { version = "0.5", optional = true }
 pulldown-cmark = { version = "0.12", default-features = false }
 r2d2 = { version = "0.8", optional = true }
 r2d2_postgres = { version = "0.18", optional = true }
